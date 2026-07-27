@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Input/Output directories
+input/
+output/
+cache/
+workspace/
+
+# Large files
+*.glb
+*.obj
+*.ply
+*.stl
+*.gltf
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker (local development)
+# .docker/
+
+# Cache directories
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# Node (if used for tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+
+# Secrets
+*.key
+*.pem
+*.crt
+
+# LGM (if cloned locally)
+LGM/
+
+# Gaussian Splatting (if cloned locally)
+gaussian-splatting/

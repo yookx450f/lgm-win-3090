@@ -1,0 +1,87 @@
+全て日本語で回答してください。
+あなたは優秀なエンジニアです。
+
+このプログラムは、複数の画像から、３Dモデリング（.glb, .obj）を生成することを目的としています。
+車の写真から、車の３Dモデリングを生成します。
+
+WindowsのWSL2上で動作し、dockerを使います。
+GPUはRTX3090を使います。
+
+
+■処理概要
+
+[複数画像]
+      ↓
+[COLMAP：カメラ推定 & 点群生成]
+      ↓
+[Gaussian Splatting：高品質3D復元]
+      ↓
+[Mesh化：Poisson / Instant Meshes]
+      ↓
+[glb / obj 出力]
+      ↓
+[Blenderで車比較動画を作成]
+
+
+■処理詳細
+
+1.
+ 前処理（Preprocessing Layer）
+• 画像の正規化
+• 車体のマスク生成（背景除去）
+• 画像の整列
+
+
+2.
+ COLMAP：カメラ推定 & 点群生成
+• Structure-from-Motion (SfM)
+• カメラパラメータの推定
+• 疎点群（Sparse Point Cloud）生成
+• 画像間の対応点を検出
+
+
+3.
+ Dense Reconstruction（密点群生成）
+• 密点群（Dense Point Cloud）生成
+• 多視点ステレオ（Multi-View Stereo）
+• 詳細な形状の復元
+
+
+4.
+ Gaussian Splatting：高品質3D復元
+• 3Dガウス分布の最適化
+• 高品質なレンダリング
+• テクスチャの高精度な表現
+• 反射・光沢の再現
+
+
+5.
+ Mesh化（Meshing）
+• Poisson Surface Reconstruction
+• Instant Meshes
+• 点群 → メッシュ（Mesh）化
+• メッシュの平滑化
+
+
+6.
+ Texture Baking（テクスチャ生成）
+• UV展開
+• テクスチャマッピング
+• 色補正
+• 光沢（Specular）
+• 反射（Reflection）
+
+
+7.
+出力（Export Layer）
+最終的に以下の形式で出力：
+• glb（YouTube向けに最適）
+• obj
+• ply
+
+
+8.
+ Blenderで車比較動画を作成
+• 複数の3Dモデルを比較
+• YouTube向けの動画を作成
+• アニメーションの追加

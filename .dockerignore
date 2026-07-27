@@ -1,0 +1,49 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache directories
+.cache
+__pycache__
+*.pyc
+*.pyo
+
+# Output directories
+output/
+workspace/
+input/
+
+# Large files
+*.glb
+*.obj
+*.ply
+*.stl
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Scripts (mounted as volume)
+scripts/
