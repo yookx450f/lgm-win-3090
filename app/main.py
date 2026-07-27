@@ -1,5 +1,5 @@
 """
-LGM Win 3090 - 3D Car Model Generator Web API
+3D Model Generator Web API
 FastAPI-based server for 3D modeling pipeline management
 """
 
@@ -26,8 +26,8 @@ sys.path.insert(0, '/workspace/scripts')
 from scripts.run_pipeline import parse_args as pipeline_parse_args
 
 app = FastAPI(
-    title="LGM Car 3D Model Generator",
-    description="Web API for generating 3D models from car images",
+    title="3D Model Generator",
+    description="Web API for generating 3D models from images",
     version="1.0.0"
 )
 
@@ -457,7 +457,7 @@ async def get_index_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LGM Car 3D Model Generator</title>
+    <title>3D Model Generator</title>
     <style>
         * {
             margin: 0;
@@ -697,8 +697,8 @@ async def get_index_html():
 </head>
 <body>
     <div class="header">
-        <h1>🚗 LGM Car 3D Model Generator</h1>
-        <p>複数の画像から高性能車の3Dモデルを生成</p>
+        <h1>🚗 3D Model Generator</h1>
+        <p>複数の画像から3Dモデルを生成</p>
     </div>
     
     <div class="container">
@@ -760,7 +760,7 @@ async def get_index_html():
     </div>
     
     <footer>
-        <p>LGM Car 3D Model Generator v1.0.0 | GPU: RTX 3090</p>
+        <p>3D Model Generator v1.0.0 | GPU: RTX 3090</p>
     </footer>
     
     <script>

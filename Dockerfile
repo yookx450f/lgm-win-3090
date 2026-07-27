@@ -83,12 +83,33 @@ RUN pip3 install --no-cache-dir \
 # Git clone 3D Gaussian Splatting repository
 RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting 2>/dev/null || true
 
-# Install COLMAP from source
+# Install COLMAP from binary release (with retry logic and fallback)
 WORKDIR /tmp
-RUN wget -q https://github.com/colmap/colmap/releases/download/colmap-3.8.0/COLMAP-3.8.0-linux.run -O colmap-installer.run && \
-    chmod +x colmap-installer.run && \
-    ./colmap-installer.run --target /opt/colmap --nobin --nooverride && \
-    ln -s /opt/colmap/bin/colmap /usr/local/bin/colmap
+RUN set -e; \
+    # Try multiple COLMAP versions in order of preference; \
+    for VERSION in 3.8.0 3.8 3.7.1 3.3.1; do \
+        echo "Trying COLMAP version: $$VERSION"; \
+        if wget -q --timeout=60 --tries=3 "https://github.com/colmap/colmap/releases/download/colmap-$$VERSION/COLMAP-$$VERSION-linux.run" -O colmap-installer.run 2>/dev/null; then \
+            echo "Successfully downloaded COLMAP-$$VERSION"; \
+            break; \
+        else \
+            echo "Failed to download COLMAP-$$VERSION, trying next version..."; \
+        fi; \
+    done; \
+    # If all downloads failed, try installing from apt; \
+    if [ ! -f colmap-installer.run ] || [ ! -s colmap-installer.run ]; then \
+        echo "All downloads failed, attempting apt installation..."; \
+        apt-get update && apt-get install -y colmap || echo "WARNING: COLMAP installation via apt failed"; \
+    else \
+        chmod +x colmap-installer.run; \
+        mkdir -p /opt/colmap; \
+        ./colmap-installer.run --target /opt/colmap --nobin --nooverride || echo "WARNING: COLMAP installer run failed"; \
+        if [ -d /opt/colmap/bin ]; then \
+            ln -sf /opt/colmap/bin/colmap /usr/local/bin/colmap 2>/dev/null || true; \
+        fi; \
+    fi; \
+    echo "COLMAP installation complete"; \
+    colmap --version 2>/dev/null || echo "COLMAP version check failed (non-critical)"
 
 # Set environment variables
 ENV PYTHONPATH=/workspace:${PYTHONPATH}

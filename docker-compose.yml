@@ -8,10 +8,9 @@ services:
       dockerfile: Dockerfile
     image: lgm-car-model:latest
     container_name: lgm-car-api
-    runtime: nvidia
+    # CDI (Common Device Interface) webgpu方式を使用
+    # runtime: nvidia は明示的に指定しない
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - CUDA_VISIBLE_DEVICES=0
     volumes:
       # Input images directory
@@ -29,8 +28,6 @@ services:
     ports:
       - "8000:8000"
     ipc: host
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
     restart: unless-stopped
     command: >
       bash -c "
@@ -44,16 +41,14 @@ services:
       "
 
   # Legacy: Direct pipeline execution (for backward compatibility)
+  # CDI webgpu方式を使用
   car-model:
     build:
       context: .
       dockerfile: Dockerfile
     image: lgm-car-model:latest
     container_name: lgm-car-model
-    runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - CUDA_VISIBLE_DEVICES=0
     volumes:
       # Input images directory
@@ -67,9 +62,6 @@ services:
       # Scripts directory
       - ./scripts:/workspace/scripts:ro
     ipc: host
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidia1:/dev/nvidia1
     restart: unless-stopped
     command: >
       bash -c "
@@ -106,16 +98,15 @@ services:
       "
 
   # Optional: Interactive shell for debugging
+  # CDI webgpu方式を使用
   car-model-shell:
     build:
       context: .
       dockerfile: Dockerfile
     image: lgm-car-model:latest
     container_name: lgm-car-model-shell
-    runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - CUDA_VISIBLE_DEVICES=0
     volumes:
       - ./input:/workspace/input:ro
       - ./output:/workspace/output
@@ -123,7 +114,5 @@ services:
       - ./workspace:/workspace/workspace
       - ./scripts:/workspace/scripts:ro
     ipc: host
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
     tty: true
     stdin_open: true
