@@ -72,6 +72,13 @@ RUN pip3 install --no-cache-dir \
     imageio-ffmpeg \
     joblib
 
+# Install FastAPI and web dependencies
+RUN pip3 install --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
+    aiofiles
+
 # Install 3D Gaussian Splatting dependencies
 # Git clone 3D Gaussian Splatting repository
 RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting 2>/dev/null || true

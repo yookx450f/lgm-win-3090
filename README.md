@@ -130,7 +130,76 @@ lgm-win-3090/
 ./run_car_model.sh /path/to/input /path/to/output
 ```
 
-## 使用法
+## Web API
+
+### アクセス方法
+
+FastAPIサーバーを起動すると、以下のURLでアクセスできます：
+
+- **管理画面**: http://localhost:8000
+- **APIドキュメント**: http://localhost:8000/docs
+- **JSON API**: http://localhost:8000/api/
+
+### 主要エンドポイント
+
+| エンドポイント | メソッド | 説明 |
+|---------------|---------|------|
+| `/` | GET | 管理画面 |
+| `/api/jobs` | GET | ジョブ一覧を取得 |
+| `/api/jobs/{job_id}` | GET | 特定のジョブ状態を取得 |
+| `/api/upload` | POST | 画像をアップロード |
+| `/api/pipeline/{job_id}/start` | POST | パイプラインを実行 |
+| `/api/jobs/{job_id}/cancel` | POST | ジョブをキャンセル |
+| `/api/results/{job_id}` | GET | 結果ファイル一覧を取得 |
+| `/api/download/{job_id}/{filename}` | GET | ファイルをダウンロード |
+| `/api/viewer/{job_id}` | GET | 3Dモデルビューアを表示 |
+
+### 使用法
+
+#### Web APIを使用する場合
+
+1. **FastAPIサーバーを起動**
+   ```bash
+   docker compose up car-api
+   ```
+
+2. **ブラウザでアクセス**
+   - http://localhost:8000 で管理画面を開く
+
+3. **画像をアップロード**
+   - 管理画面から車の写真を複数選択してアップロード
+
+4. **パイプラインを実行**
+   - 設定を選択して「パイプライン実行」ボタンをクリック
+
+5. **結果を確認**
+   - 処理完了後、「表示」ボタンで3Dモデルを確認
+   - 「ダウンロード」ボタンで.glbファイルをダウンロード
+
+#### APIをプログラムから使用する場合
+
+```python
+import requests
+
+# 画像をアップロード
+files = [('files', ('car1.jpg', open('car1.jpg', 'rb'), 'image/jpeg'))]
+response = requests.post('http://localhost:8000/api/upload', files=files)
+job_id = response.json()['job_id']
+
+# パイプラインを実行
+config = {
+    'image_size': 1024,
+    'bg_color': 'white',
+    'mesh_method': 'poisson',
+    'animation_type': 'orbit'
+}
+response = requests.post(f'http://localhost:8000/api/pipeline/{job_id}/start', json=config)
+
+# 状態を確認
+response = requests.get(f'http://localhost:8000/api/jobs/{job_id}')
+status = response.json()
+print(f"Status: {status['status']}, Progress: {status['progress']}%")
+```
 
 ### ビルドスクリプトのオプション
 
@@ -318,11 +387,13 @@ RTX3090の24GB VRAMを使用するため、以下の設定を確認:
 | ファイル | 説明 |
 |---------|------|
 | [`Dockerfile`](Dockerfile) | Dockerイメージの定義（CUDA 12.x対応） |
-| [`docker-compose.yml`](docker-compose.yml) | Docker Compose設定（GPU対応） |
+| [`docker-compose.yml`](docker-compose.yml) | Docker Compose設定（GPU対応、FastAPI対応） |
 | [`.dockerignore`](.dockerignore) | Docker除外ファイル |
 | [`build.sh`](build.sh) | ビルドスクリプト |
 | [`run_car_model.sh`](run_car_model.sh) | 実行スクリプト |
 | [`.clinerules`](.clinerules) | プロジェクトルール |
+| [`app/__init__.py`](app/__init__.py) | アプリケーションパッケージ |
+| [`app/main.py`](app/main.py) | FastAPIサーバー（Web API） |
 | [`scripts/preprocess.py`](scripts/preprocess.py) | 前処理スクリプト |
 | [`scripts/colmap.py`](scripts/colmap.py) | COLMAP処理スクリプト |
 | [`scripts/gaussian_splatting.py`](scripts/gaussian_splatting.py) | Gaussian Splattingスクリプト |
