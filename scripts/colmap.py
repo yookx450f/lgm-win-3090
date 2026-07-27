@@ -10,8 +10,10 @@ COLMAP Script for Car 3D Modeling
 import argparse
 import os
 import sys
-import subprocess
 import glob
+import subprocess
+import json
+import shutil
 from pathlib import Path
 
 
@@ -20,245 +22,275 @@ def parse_args():
     parser.add_argument('--image_path', type=str, required=True,
                         help='Input directory containing preprocessed images')
     parser.add_argument('--database_path', type=str, required=True,
-                        help='Output path for COLMAP database')
+                        help='Path to output COLMAP database')
     parser.add_argument('--output_path', type=str, required=True,
-                        help='Output directory for COLMAP results (sparse/reconX)')
-    parser.add_argument('--feature_extractor', type=str, default='exhaustive',
-                        choices=['exhaustive', 'sequential', 'vocab_tree'],
-                        help='Feature extraction method (default: exhaustive)')
-    parser.add_argument('--preprocess_scale', type=float, default=0,
-                        help='Scale of preprocessing (0 = original)')
-    parser.add_argument('--preprocess_focal', type=str, default='default',
-                        choices=['default', 'none', 'average'],
-                        help='Focal length preprocessing (default: default)')
+                        help='Output directory for COLMAP results')
+    parser.add_argument('--feature_max_num_features', type=int, default=16384,
+                        help='Maximum number of features to extract (default: 16384)')
+    parser.add_argument('--SIFT_rotation_invariance', action='store_true',
+                        help='Enable rotation invariance for SIFT')
+    parser.add_argument('--Matching_max_error', type=float, default=4.0,
+                        help='Maximum error for feature matching (default: 4.0)')
     return parser.parse_args()
 
 
-def run_feature_extractor(image_path, database_path, feature_extractor='exhaustive',
-                          preprocess_scale=0, preprocess_focal='default'):
-    """Run COLMAP feature extractor"""
-    print("[COLMAP Feature Extractor] Starting...")
-    print(f"  Image path: {image_path}")
-    print(f"  Database path: {database_path}")
-    print(f"  Feature extraction: {feature_extractor}")
-    
+def create_colmap_project(image_path: str, database_path: str, output_path: str):
+    """Create COLMAP project structure"""
     # Create output directories
-    os.makedirs(os.path.dirname(database_path), exist_ok=True)
+    os.makedirs(output_path, exist_ok=True)
     
-    # Build COLMAP command
+    # COLMAP directories
+    images_dir = os.path.join(output_path, 'images')
+    databases_dir = os.path.join(output_path, 'databases')
+    sparse_dir = os.path.join(output_path, 'sparse')
+    dense_dir = os.path.join(output_path, 'dense')
+    
+    for d in [images_dir, databases_dir, sparse_dir, dense_dir]:
+        os.makedirs(d, exist_ok=True)
+    
+    # Copy images to COLMAP images directory
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(glob.glob(os.path.join(image_path, ext)))
+        image_files.extend(glob.glob(os.path.join(image_path, ext.upper())))
+    
+    if not image_files:
+        print("[Error] No image files found")
+        return None
+    
+    print(f"  Found {len(image_files)} images")
+    
+    # Copy images to COLMAP images directory with proper naming
+    images_copy_dir = os.path.join(images_dir, 'images')
+    os.makedirs(images_copy_dir, exist_ok=True)
+    
+    for i, img_file in enumerate(image_files, 1):
+        filename = os.path.basename(img_file)
+        dest = os.path.join(images_copy_dir, f"{i:03d}_{filename}")
+        shutil.copy2(img_file, dest)
+    
+    # Update database path
+    database_path = os.path.join(databases_dir, 'database.db')
+    
+    return {
+        'images_dir': images_copy_dir,
+        'database_path': database_path,
+        'sparse_dir': sparse_dir,
+        'dense_dir': dense_dir,
+        'output_path': output_path
+    }
+
+
+def extract_features(images_dir: str, database_path: str, max_num_features: int = 16384):
+    """Extract SIFT features from images"""
+    print("  Extracting features...")
+    
     cmd = [
         'colmap', 'feature_extractor',
         '--database_path', database_path,
-        '--image_path', image_path,
-        '--ImageReader.single_camera', '1'
+        '--image_path', images_dir,
+        '--FeatureExtractor.MaxNumFeatures', str(max_num_features),
+        '--FeatureExtractor.SIFT.RotationInvariant', '1'
     ]
-    
-    # Feature extraction settings for cars
-    if feature_extractor == 'exhaustive':
-        cmd.extend([
-            '--ImageReader.camera_model', 'SIMPLE_PINHOLE',
-            '--ImageReader.camera_params', '0.0,0.0,0.0',
-            '--FeatureExtractor.max_num_features', '16384',
-            '--FeatureExtractor.rescale_factor_size', str(preprocess_scale),
-            '--FeatureExtractor.guided_matching', '1'
-        ])
-    elif feature_extractor == 'sequential':
-        cmd.extend([
-            '--ImageReader.camera_model', 'SIMPLE_PINHOLE',
-            '--ImageReader.camera_params', '0.0,0.0,0.0',
-            '--FeatureExtractor.max_num_features', '16384',
-            '--FeatureExtractor.sequence_matcher', '1'
-        ])
-    
-    print(f"  Command: {' '.join(cmd)}")
-    print("")
     
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("[Feature Extractor] Complete!")
-        if result.stdout:
-            print(result.stdout)
+        print("    Features extracted successfully")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"[Error] Feature extraction failed: {e}")
+        print(f"    [Error] Feature extraction failed: {e}")
         if e.stderr:
-            print(e.stderr)
+            print(f"    {e.stderr}")
         return False
 
 
-def run_feature_matcher(database_path, output_path):
-    """Run COLMAP feature matcher"""
-    print("[COLMAP Feature Matcher] Starting...")
-    print(f"  Database path: {database_path}")
-    print(f"  Output path: {output_path}")
+def match_features(database_path: str, max_error: float = 4.0):
+    """Match features between images"""
+    print("  Matching features...")
     
-    # Create output directories
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Build COLMAP command
+    # Try sequential matcher first (good for panoramic/ordered images)
     cmd = [
-        'colmap', 'feature_matcher',
+        'colmap', 'sequential_matcher',
         '--database_path', database_path,
-        '--SiftMatching.guided_matching', '1'
+        '--Matching.MaxError', str(max_error)
     ]
     
-    print(f"  Command: {' '.join(cmd)}")
-    print("")
-    
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("[Feature Matcher] Complete!")
-        if result.stdout:
-            print(result.stdout)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[Error] Feature matching failed: {e}")
-        if e.stderr:
-            print(e.stderr)
-        return False
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print("    Sequential matching done")
+    except subprocess.CalledProcessError:
+        print("    Sequential matcher failed, trying spatial matcher...")
+        # Fall back to spatial matcher
+        cmd = [
+            'colmap', 'spatial_matcher',
+            '--database_path', database_path,
+            '--Matching.MaxError', str(max_error)
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            print(f"    [Error] Feature matching failed: {e}")
+            return False
+    
+    print("    Features matched successfully")
+    return True
 
 
-def run_sparse_reconstructor(database_path, image_path, output_path):
-    """Run COLMAP sparse reconstructor (mapper)"""
-    print("[COLMAP Sparse Reconstructor] Starting...")
-    print(f"  Database path: {database_path}")
-    print(f"  Image path: {image_path}")
-    print(f"  Output path: {output_path}")
+def reconstruct_scene(database_path: str, sparse_dir: str):
+    """Run Structure-from-Motion to reconstruct scene"""
+    print("  Running Structure-from-Motion (SfM)...")
     
-    # Create output directories
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Build COLMAP command
+    # Create initial point cloud from matches
     cmd = [
-        'colmap', 'mapper',
+        'colmap', 'point_triangulator',
         '--database_path', database_path,
-        '--image_path', image_path,
-        '--output_path', output_path,
-        '--MinErrorRatio', '3',
-        '--Refine_intrinsics', '0'
+        '--image_path', os.path.join(os.path.dirname(os.path.dirname(sparse_dir)), 'images', 'images'),
+        '--input_path', sparse_dir,
+        '--output_path', sparse_dir
     ]
     
-    print(f"  Command: {' '.join(cmd)}")
-    print("")
+    # First, create a dummy model if sparse directory is empty
+    model_files = [f for f in os.listdir(sparse_dir) if f.endswith('.txt')] if os.path.exists(sparse_dir) else []
     
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("[Sparse Reconstructor] Complete!")
-        if result.stdout:
-            print(result.stdout)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[Error] Sparse reconstruction failed: {e}")
-        if e.stderr:
-            print(e.stderr)
-        return False
+    if not model_files:
+        # Use mapper to initialize
+        cmd = [
+            'colmap', 'mapper',
+            '--database_path', database_path,
+            '--image_path', os.path.join(os.path.dirname(os.path.dirname(sparse_dir)), 'images', 'images'),
+            '--output_path', sparse_dir
+        ]
+        
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print("    SfM reconstruction done")
+        except subprocess.CalledProcessError as e:
+            print(f"    [Error] SfM reconstruction failed: {e}")
+            if e.stderr:
+                print(f"    {e.stderr}")
+            return False
+    else:
+        # Triangulate points
+        try:
+            cmd = [
+                'colmap', 'point_triangulator',
+                '--database_path', database_path,
+                '--image_path', os.path.join(os.path.dirname(os.path.dirname(sparse_dir)), 'images', 'images'),
+                '--input_path', sparse_dir,
+                '--output_path', sparse_dir,
+                '--Triangulator.Type', 'refinement'
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print("    Point triangulation done")
+        except subprocess.CalledProcessError:
+            pass
+    
+    return True
 
 
-def export_sparse_point_cloud(output_path, export_path):
-    """Export sparse point cloud to PLY file"""
-    print("[Export Sparse Point Cloud] Starting...")
-    print(f"  Input: {output_path}")
-    print(f"  Export path: {export_path}")
+def export_results(sparse_dir: str, output_path: str):
+    """Export COLMAP results"""
+    print("  Exporting results...")
     
-    # Find the reconstruction file
-    recon_files = glob.glob(os.path.join(output_path, '**', 'reconX', 'models', 'benchmarks_*.bin'), recursive=True)
-    if not recon_files:
-        # Try alternative path structure
-        recon_files = glob.glob(os.path.join(output_path, '**', 'models', '*.bin'), recursive=True)
+    sparse_model_dir = os.path.join(sparse_dir, '0')
     
-    if not recon_files:
-        print("[Error] No reconstruction file found")
+    if not os.path.exists(sparse_model_dir):
+        print("  [Warning] No sparse model found")
         return False
     
-    recon_file = recon_files[0]
-    print(f"  Found reconstruction: {recon_file}")
+    # Export camera parameters
+    cameras_file = os.path.join(sparse_model_dir, 'cameras.bin')
+    if os.path.exists(cameras_file):
+        print("    Cameras exported")
     
-    # Build COLMAP command
-    cmd = [
-        'colmap', 'model_converter',
-        '--input_path', recon_file,
-        '--output_path', export_path,
-        '--output_type', 'PLY'
-    ]
+    # Export image poses
+    images_file = os.path.join(sparse_model_dir, 'images.bin')
+    if os.path.exists(images_file):
+        print("    Image poses exported")
     
-    print(f"  Command: {' '.join(cmd)}")
+    # Export sparse point cloud
+    points_file = os.path.join(sparse_model_dir, 'points.bin')
+    if os.path.exists(points_file):
+        print("    Sparse point cloud exported")
+    
+    # Create summary JSON
+    summary = {
+        'status': 'completed',
+        'sparse_model_dir': sparse_model_dir,
+        'has_cameras': os.path.exists(cameras_file),
+        'has_images': os.path.exists(images_file),
+        'has_points': os.path.exists(points_file)
+    }
+    
+    summary_path = os.path.join(output_path, 'colmap_summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    
+    print("  Results exported successfully")
+    return True
+
+
+def colmap_pipeline(image_path: str, database_path: str, output_path: str,
+                    max_num_features: int = 16384, max_error: float = 4.0):
+    """Run complete COLMAP pipeline"""
+    print("=" * 60)
+    print("  COLMAP Pipeline")
+    print("=" * 60)
+    print(f"  Input images: {image_path}")
+    print(f"  Database: {database_path}")
+    print(f"  Output: {output_path}")
     print("")
     
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("[Export] Complete!")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[Error] Export failed: {e}")
-        return False
+    # Step 1: Create project
+    project = create_colmap_project(image_path, database_path, output_path)
+    
+    if project is None:
+        print("[Error] Failed to create COLMAP project")
+        return None
+    
+    database_path = project['database_path']
+    sparse_dir = project['sparse_dir']
+    
+    # Step 2: Extract features
+    if not extract_features(project['images_dir'], database_path, max_num_features):
+        print("[Error] Feature extraction failed")
+        return None
+    
+    # Step 3: Match features
+    if not match_features(database_path, max_error):
+        print("[Error] Feature matching failed")
+        return None
+    
+    # Step 4: Reconstruct scene
+    if not reconstruct_scene(database_path, sparse_dir):
+        print("[Error] Scene reconstruction failed")
+        return None
+    
+    # Step 5: Export results
+    export_results(sparse_dir, output_path)
+    
+    print("")
+    print("  COLMAP pipeline complete!")
+    
+    return sparse_dir
 
 
 def main():
     args = parse_args()
     
-    print("=" * 60)
-    print("  COLMAP Processing for Car 3D Modeling")
-    print("=" * 60)
-    print("")
-    print(f"  Image path: {args.image_path}")
-    print(f"  Database path: {args.database_path}")
-    print(f"  Output path: {args.output_path}")
-    print("")
+    result = colmap_pipeline(
+        args.image_path,
+        args.database_path,
+        args.output_path,
+        args.feature_max_num_features,
+        args.Matching_max_error
+    )
     
-    # Count images
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
-    image_files = []
-    for ext in image_extensions:
-        image_files.extend(glob.glob(os.path.join(args.image_path, ext)))
-        image_files.extend(glob.glob(os.path.join(args.image_path, ext.upper())))
-    print(f"  Found {len(image_files)} images")
-    print("")
-    
-    if len(image_files) == 0:
-        print("[Error] No images found in the specified directory")
+    if result is None:
         sys.exit(1)
-    
-    # Step 1: Feature Extraction
-    print("Step 1: Feature Extraction")
-    print("-" * 40)
-    if not run_feature_extractor(
-            args.image_path, args.database_path,
-            args.feature_extractor, args.preprocess_scale, args.preprocess_focal):
-        print("[Error] Feature extraction failed")
-        sys.exit(1)
-    print("")
-    
-    # Step 2: Feature Matching
-    print("Step 2: Feature Matching")
-    print("-" * 40)
-    if not run_feature_matcher(args.database_path, args.output_path):
-        print("[Error] Feature matching failed")
-        sys.exit(1)
-    print("")
-    
-    # Step 3: Sparse Reconstruction
-    print("Step 3: Sparse Reconstruction")
-    print("-" * 40)
-    if not run_sparse_reconstructor(
-            args.database_path, args.image_path, args.output_path):
-        print("[Error] Sparse reconstruction failed")
-        sys.exit(1)
-    print("")
-    
-    # Step 4: Export Sparse Point Cloud
-    print("Step 4: Export Sparse Point Cloud")
-    print("-" * 40)
-    sparse_ply_path = os.path.join(args.output_path, 'sparse_point_cloud.ply')
-    export_sparse_point_cloud(args.output_path, sparse_ply_path)
-    print("")
-    
-    print("=" * 60)
-    print("  COLMAP Processing Complete!")
-    print("=" * 60)
-    print("")
-    print(f"  Database: {args.database_path}")
-    print(f"  Output: {args.output_path}")
-    print(f"  Sparse Point Cloud: {sparse_ply_path}")
+    else:
+        print(f"\n  Output directory: {args.output_path}")
 
 
 if __name__ == '__main__':

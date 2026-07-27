@@ -2,138 +2,245 @@
 """
 Preprocessing Script for Car 3D Modeling
 - Image normalization
-- Car body mask generation (background removal)
+- Background masking (car segmentation)
 - Image alignment
-- Camera position estimation (Structure-from-Motion)
 """
 
 import argparse
 import os
 import sys
 import glob
+import subprocess
 from pathlib import Path
-
 import numpy as np
-from PIL import Image
-import cv2
+
+try:
+    from PIL import Image, ImageOps, ImageFilter
+    import cv2
+except ImportError:
+    print("[Error] Please install required packages:")
+    print("  pip install Pillow opencv-python numpy")
+    sys.exit(1)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Preprocess car images for 3D modeling')
-    parser.add_argument('--input_dir', type=str, required=True, help='Input directory containing car images')
-    parser.add_argument('--output_dir', type=str, required=True, help='Output directory for preprocessed images')
-    parser.add_argument('--image_size', type=int, default=1024, help='Target image size (default: 1024)')
-    parser.add_argument('--bg_color', type=str, default='white', help='Background color: white, black, green (default: white)')
+    parser = argparse.ArgumentParser(description='Preprocessing for car 3D modeling')
+    parser.add_argument('--input_dir', type=str, required=True,
+                        help='Input directory containing car images')
+    parser.add_argument('--output_dir', type=str, required=True,
+                        help='Output directory for preprocessed images')
+    parser.add_argument('--image_size', type=int, default=1024,
+                        help='Target image size (default: 1024)')
+    parser.add_argument('--bg_color', type=str, default='white',
+                        choices=['white', 'black', 'green', 'transparent'],
+                        help='Background color (default: white)')
     return parser.parse_args()
 
 
-def load_images(input_dir):
-    """Load images from input directory"""
-    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-    image_paths = []
+def normalize_image(image: Image.Image, target_size: int) -> Image.Image:
+    """Normalize image size and format"""
+    # Convert to RGB if necessary
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
     
-    for ext in image_extensions:
-        image_paths.extend(glob.glob(os.path.join(input_dir, f'*{ext}')))
-        image_paths.extend(glob.glob(os.path.join(input_dir, f'*{ext.upper()}')))
+    # Resize maintaining aspect ratio
+    original_size = image.size
+    ratio = target_size / max(original_size)
+    new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
     
-    if not image_paths:
-        print(f"Error: No images found in {input_dir}")
-        sys.exit(1)
+    image = image.resize(new_size, Image.Resampling.LANCZOS)
     
-    print(f"Found {len(image_paths)} images")
-    return sorted(image_paths)
+    # Create canvas with target size
+    canvas = Image.new('RGB', (target_size, target_size), 'white')
+    
+    # Center the image
+    x_offset = (target_size - new_size[0]) // 2
+    y_offset = (target_size - new_size[1]) // 2
+    
+    canvas.paste(image, (x_offset, y_offset))
+    
+    return canvas
 
 
-def normalize_image(image_path, target_size=1024, bg_color='white'):
-    """Normalize image to target size"""
-    img = Image.open(image_path).convert('RGB')
+def detect_background(image: Image.Image) -> Image.Image:
+    """Detect and create background mask"""
+    img_array = np.array(image)
     
-    # Calculate aspect ratio and resize maintaining aspect ratio
-    orig_w, orig_h = img.size
-    scale = target_size / max(orig_w, orig_h)
-    new_w = int(orig_w * scale)
-    new_h = int(orig_h * scale)
+    # Sample corners to determine background color
+    h, w = img_array.shape[:2]
+    corner_size = min(20, h // 10, w // 10)
     
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+    corners = [
+        img_array[0:corner_size, 0:corner_size],
+        img_array[0:corner_size, w-corner_size:w],
+        img_array[h-corner_size:h, 0:corner_size],
+        img_array[h-corner_size:h, w-corner_size:w]
+    ]
     
-    # Create canvas with background color
+    bg_color = np.mean(np.vstack([c.reshape(-1, 3) for c in corners]), axis=0)
+    
+    # Calculate difference from background
+    diff = np.abs(img_array.astype(float) - bg_color)
+    mask = np.any(diff > 30, axis=2)  # Threshold for foreground
+    
+    # Create mask image
+    mask_image = Image.fromarray((mask * 255).astype(np.uint8), mode='L')
+    
+    return mask_image
+
+
+def remove_background(image: Image.Image, bg_color: str = 'white') -> Image.Image:
+    """Remove background and replace with specified color"""
+    # Get mask
+    mask = detect_background(image)
+    
+    # Convert to RGBA
+    rgba_image = image.convert('RGBA')
+    rgba_mask = mask.convert('RGBA')
+    
+    # Apply mask
+    rgba_image.putalpha(rgba_mask)
+    
+    # Create background
     if bg_color == 'white':
-        bg = Image.new('RGB', (target_size, target_size), (255, 255, 255))
+        bg = Image.new('RGBA', rgba_image.size, (255, 255, 255, 255))
     elif bg_color == 'black':
-        bg = Image.new('RGB', (target_size, target_size), (0, 0, 0))
+        bg = Image.new('RGBA', rgba_image.size, (0, 0, 0, 255))
     elif bg_color == 'green':
-        bg = Image.new('RGB', (target_size, target_size), (0, 255, 0))
+        bg = Image.new('RGBA', rgba_image.size, (0, 255, 0, 255))
     else:
-        bg = Image.new('RGB', (target_size, target_size), (255, 255, 255))
+        bg = Image.new('RGBA', rgba_image.size, (255, 255, 255, 255))
     
-    # Paste image centered on canvas
-    x_offset = (target_size - new_w) // 2
-    y_offset = (target_size - new_h) // 2
-    bg.paste(img, (x_offset, y_offset))
+    # Composite
+    result = Image.alpha_composite(bg, rgba_image)
     
-    return np.array(bg)
+    return result.convert('RGB')
 
 
-def generate_mask(image_array):
-    """Generate mask for car body (background removal)"""
-    # Convert to HSV color space
-    img_hsv = cv2.cvtColor(image_array, cv2.COLOR_RGB2HSV)
+def align_image(image: Image.Image) -> Image.Image:
+    """Align image to center and correct orientation"""
+    # Convert to numpy array
+    img_array = np.array(image)
     
-    # Define range of colors (adjust based on car colors)
-    # This is a simple color-based mask - can be improved with ML-based segmentation
+    # Convert to grayscale and threshold
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
     
-    # For now, return a full mask (no background removal)
-    # In production, use a pre-trained model for car segmentation
-    mask = np.ones((image_array.shape[0], image_array.shape[1]), dtype=np.uint8)
+    # Find bounding box of foreground
+    coords = cv2.findNonZero(thresh)
+    if coords is not None:
+        x, y, w, h = cv2.boundingRect(coords)
+        
+        # Crop to bounding box
+        cropped = img_array[y:y+h, x:x+w]
+        
+        # Resize to square
+        size = max(w, h)
+        resized = cv2.resize(cropped, (size, size), cv2.INTER_LANCZOS4)
+        
+        # Create canvas
+        canvas = np.full((size, size, 3), 255, dtype=np.uint8)
+        cx = (size - w) // 2
+        cy = (size - h) // 2
+        canvas[cy:cy+h, cx:cx+w] = cropped
+        
+        return Image.fromarray(canvas)
     
-    return mask
+    return image
 
 
-def save_preprocessed(image_array, mask, output_path, image_name):
-    """Save preprocessed image and mask"""
-    # Save image
-    img_pil = Image.fromarray(image_array)
-    img_path = os.path.join(output_path, f'{image_name}.png')
-    img_pil.save(img_path)
+def enhance_car_features(image: Image.Image) -> Image.Image:
+    """Enhance car features for better 3D reconstruction"""
+    img_array = np.array(image).astype(float)
     
-    # Save mask
-    mask_path = os.path.join(output_path, f'{image_name}_mask.png')
-    Image.fromarray(mask).save(mask_path)
+    # Apply subtle sharpening
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5, -1],
+                       [0, -1, 0]])
     
-    return img_path, mask_path
+    img_array = np.clip(img_array, 0, 255)
+    
+    # Apply contrast enhancement
+    gray = np.mean(img_array, axis=2)
+    histogram, _ = np.histogram(gray.flatten(), bins=256, range=(0, 255))
+    cdf = histogram.cumsum()
+    
+    # Normalize CDF
+    cdf_normalized = cdf * 255.0 / cdf[-1]
+    
+    result = np.clip(img_array, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(result)
+
+
+def preprocess_image(input_path: str, output_path: str, target_size: int, bg_color: str):
+    """Process a single image"""
+    print(f"  Processing: {os.path.basename(input_path)}")
+    
+    # Load image
+    image = Image.open(input_path)
+    
+    # Step 1: Normalize
+    image = normalize_image(image, target_size)
+    
+    # Step 2: Remove background
+    if bg_color != 'transparent':
+        image = remove_background(image, bg_color)
+    
+    # Step 3: Align
+    image = align_image(image)
+    
+    # Step 4: Enhance
+    image = enhance_car_features(image)
+    
+    # Save
+    image.save(output_path, 'JPEG', quality=95)
+    print(f"    -> Saved: {output_path}")
 
 
 def main():
     args = parse_args()
     
+    print("=" * 60)
+    print("  Preprocessing Step")
+    print("=" * 60)
+    print(f"  Input: {args.input_dir}")
+    print(f"  Output: {args.output_dir}")
+    print(f"  Image Size: {args.image_size}")
+    print(f"  Background: {args.bg_color}")
+    print("")
+    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Load images
-    image_paths = load_images(args.input_dir)
+    # Find images
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(glob.glob(os.path.join(args.input_dir, ext)))
+        image_files.extend(glob.glob(os.path.join(args.input_dir, ext.upper())))
     
-    print(f"Preprocessing {len(image_paths)} images...")
-    print(f"Output directory: {args.output_dir}")
+    if not image_files:
+        print("[Error] No image files found in input directory")
+        sys.exit(1)
+    
+    print(f"  Found {len(image_files)} images")
     print("")
     
-    for i, img_path in enumerate(image_paths):
-        image_name = os.path.splitext(os.path.basename(img_path))[0]
-        print(f"Processing [{i+1}/{len(image_paths)}]: {image_name}")
+    # Process each image
+    for i, input_path in enumerate(image_files, 1):
+        filename = os.path.basename(input_path)
+        output_filename = f"preprocessed_{i:03d}_{filename.rsplit('.', 1)[0]}.jpg"
+        output_path = os.path.join(args.output_dir, output_filename)
         
-        # Normalize image
-        image_array = normalize_image(img_path, args.image_size, args.bg_color)
-        
-        # Generate mask
-        mask = generate_mask(image_array)
-        
-        # Save preprocessed data
-        save_preprocessed(image_array, mask, args.output_dir, image_name)
-        
-        print(f"  -> Saved: {image_name}.png, {image_name}_mask.png")
+        try:
+            preprocess_image(input_path, output_path, args.image_size, args.bg_color)
+        except Exception as e:
+            print(f"  [Warning] Failed to process {filename}: {e}")
     
     print("")
-    print(f"Preprocessing complete! Output saved to: {args.output_dir}")
-    print(f"Total images: {len(image_paths)}")
+    print(f"  Preprocessing complete! {len(image_files)} images processed.")
+    print(f"  Output directory: {args.output_dir}")
 
 
 if __name__ == '__main__':

@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
 Texture Baking Script for Car 3D Modeling
-- UV Unwrapping (using trimesh)
-- Texture mapping from multiple views
-- Color correction and optimization
-- Specular (gloss) handling
-- Reflection handling
-- PBR (Physically-Based Rendering) material generation
+- UV unwrapping
+- Texture mapping
+- Color correction
+- Specular (gloss)
+- Reflection
 """
 
 import argparse
 import os
 import sys
 import glob
+import subprocess
+import json
+import shutil
 from pathlib import Path
-
 import numpy as np
-from PIL import Image
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Texture baking for car 3D modeling')
     parser.add_argument('--input', type=str, required=True,
-                        help='Input GLB/OBJ/PLY file path')
+                        help='Input 3D model file (glb/obj/ply)')
     parser.add_argument('--output', type=str, required=True,
-                        help='Output textured GLB file path')
+                        help='Output textured 3D model file')
     parser.add_argument('--texture_size', type=int, default=2048,
                         help='Texture resolution (default: 2048)')
     parser.add_argument('--specular_strength', type=float, default=0.5,
@@ -35,815 +35,465 @@ def parse_args():
                         help='Metallic value (default: 0.1)')
     parser.add_argument('--clearcoat', type=float, default=0.5,
                         help='Clearcoat value for car paint (default: 0.5)')
-    parser.add_argument('--normal_strength', type=float, default=1.0,
-                        help='Normal map strength (default: 1.0)')
     parser.add_argument('--source_images', type=str, default=None,
                         help='Directory containing source images for texturing')
-    parser.add_argument('--uv_method', type=str, default='angle',
-                        choices=['angle', 'assimp', 'lscm'],
-                        help='UV unwrapping method (default: angle)')
     return parser.parse_args()
 
 
-def uv_unwrap(mesh_path, uv_method='angle'):
-    """
-    UV Unwrapping for car mesh
+def find_model_file(input_dir: str):
+    """Find 3D model file in input directory"""
+    # Look for GLB files
+    glb_files = glob.glob(os.path.join(input_dir, '*.glb')) + \
+                glob.glob(os.path.join(input_dir, '*.gltf'))
+    
+    # Look for OBJ files
+    obj_files = glob.glob(os.path.join(input_dir, '*.obj'))
+    
+    # Look for PLY files
+    ply_files = glob.glob(os.path.join(input_dir, '*.ply'))
+    
+    if glb_files:
+        return glb_files[0]
+    elif obj_files:
+        return obj_files[0]
+    elif ply_files:
+        return ply_files[0]
+    
+    return None
 
-    Uses trimesh's UV unwrapping capabilities to create
-    optimal UV coordinates for texturing.
 
-    Args:
-        mesh_path: Path to input mesh file
-        uv_method: UV unwrapping method ('angle', 'lscm', 'assimp')
+def load_model(file_path: str):
+    """Load 3D model file"""
+    print(f"  Loading model: {file_path}")
+    
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext == '.obj':
+        return load_obj(file_path)
+    elif ext == '.ply':
+        return load_ply_model(file_path)
+    elif ext == '.glb' or ext == '.gltf':
+        return load_glb(file_path)
+    else:
+        print(f"  [Error] Unsupported format: {ext}")
+        return None
 
-    Returns:
-        Path to mesh with UV coordinates
-    """
-    print("=" * 60)
-    print("  UV Unwrapping")
-    print("=" * 60)
-    print(f"  Input: {mesh_path}")
-    print(f"  UV Method: {uv_method}")
 
+def load_obj(file_path: str):
+    """Load OBJ model file"""
+    vertices = []
+    faces = []
+    uv_coords = []
+    
+    with open(file_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            
+            if parts[0] == 'v':
+                vertices.append([float(x) for x in parts[1:4]])
+            elif parts[0] == 'vt':
+                uv_coords.append([float(x) for x in parts[1:3]])
+            elif parts[0] == 'f':
+                face = []
+                for x in parts[1:4]:
+                    parts_idx = x.split('/')
+                    face.append(int(parts_idx[0]) - 1)
+                faces.append(face)
+    
+    if not vertices:
+        return None
+    
+    result = {
+        'vertices': np.array(vertices),
+        'faces': np.array(faces),
+        'uv_coords': np.array(uv_coords) if uv_coords else None,
+        'colors': None,
+        'file_path': file_path
+    }
+    
+    print(f"    Loaded: {len(vertices)} vertices, {len(faces)} faces")
+    return result
+
+
+def load_ply_model(file_path: str):
+    """Load PLY model file"""
+    vertices = []
+    faces = []
+    colors = []
+    
+    header_end = False
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            
+            if line.startswith('element vertex'):
+                num_vertices = int(line.split()[-1])
+                continue
+            
+            if line == 'end_header':
+                header_end = True
+                continue
+            
+            if header_end:
+                parts = line.split()
+                if len(parts) >= 3:
+                    vertices.append([float(x) for x in parts[:3]])
+                    
+                    if len(parts) >= 6:
+                        colors.append([float(x) for x in parts[3:6]])
+                    elif len(parts) >= 6:
+                        # Check for RGB colors
+                        if 'red' in line.lower() or 'green' in line.lower() or 'blue' in line.lower():
+                            colors.append([float(x) for x in parts[3:6]])
+    
+    if not vertices:
+        return None
+    
+    result = {
+        'vertices': np.array(vertices),
+        'faces': np.array(faces) if faces else None,
+        'colors': np.array(colors) if colors else None,
+        'uv_coords': None,
+        'file_path': file_path
+    }
+    
+    print(f"    Loaded: {len(vertices)} vertices")
+    return result
+
+
+def load_glb(file_path: str):
+    """Load GLB model file (simplified)"""
+    print("  [Warning] GLB loading is simplified. Use external tools for full support.")
+    return None
+
+
+def generate_uv_coords(vertices, faces):
+    """Generate UV coordinates using simple projection"""
+    print("  Generating UV coordinates...")
+    
+    num_vertices = len(vertices)
+    uv_coords = np.zeros((num_vertices, 2), dtype=np.float32)
+    
+    # Calculate bounding box
+    min_coords = np.min(vertices, axis=0)
+    max_coords = np.max(vertices, axis=0)
+    range_x = max_coords[0] - min_coords[0]
+    range_y = max_coords[1] - min_coords[1]
+    range_z = max_coords[2] - min_coords[2]
+    
+    # Use largest axis for UV projection
+    if range_x >= range_y and range_x >= range_z:
+        # Project onto YZ plane
+        uv_coords[:, 0] = (vertices[:, 1] - min_coords[1]) / max(range_y, 0.001)
+        uv_coords[:, 1] = (vertices[:, 2] - min_coords[2]) / max(range_z, 0.001)
+    elif range_y >= range_x and range_y >= range_z:
+        # Project onto XZ plane
+        uv_coords[:, 0] = (vertices[:, 0] - min_coords[0]) / max(range_x, 0.001)
+        uv_coords[:, 1] = (vertices[:, 2] - min_coords[2]) / max(range_z, 0.001)
+    else:
+        # Project onto XY plane
+        uv_coords[:, 0] = (vertices[:, 0] - min_coords[0]) / max(range_x, 0.001)
+        uv_coords[:, 1] = (vertices[:, 1] - min_coords[1]) / max(range_y, 0.001)
+    
+    # Normalize to [0, 1]
+    uv_min = np.min(uv_coords, axis=0)
+    uv_max = np.max(uv_coords, axis=0)
+    uv_range = uv_max - uv_min
+    
+    if uv_range[0] > 0:
+        uv_coords[:, 0] = (uv_coords[:, 0] - uv_min[0]) / uv_range[0]
+    if uv_range[1] > 0:
+        uv_coords[:, 1] = (uv_coords[:, 1] - uv_min[1]) / uv_range[1]
+    
+    print(f"    Generated UV coordinates for {num_vertices} vertices")
+    return uv_coords
+
+
+def create_texture_from_images(source_images: str, texture_size: int):
+    """Create texture from source images using average color"""
+    if not source_images or not os.path.exists(source_images):
+        return None
+    
+    print("  Creating texture from source images...")
+    
+    image_files = glob.glob(os.path.join(source_images, '*.jpg')) + \
+                  glob.glob(os.path.join(source_images, '*.png'))
+    
+    if not image_files:
+        print("  [Warning] No source images found")
+        return None
+    
+    # Load and average images
+    images = []
+    for img_file in image_files[:10]:  # Use up to 10 images
+        try:
+            from PIL import Image
+            img = Image.open(img_file).resize((texture_size, texture_size), Image.Resampling.LANCZOS)
+            images.append(np.array(img).astype(np.float32))
+        except Exception as e:
+            print(f"    Warning: Failed to load {img_file}: {e}")
+    
+    if not images:
+        return None
+    
+    # Create average texture
+    texture = np.mean(images, axis=0).astype(np.uint8)
+    print(f"    Created texture: {texture.shape}")
+    
+    return texture
+
+
+def apply_material_properties(mesh: dict, specular_strength: float, 
+                              roughness: float, metallic: float, clearcoat: float):
+    """Apply material properties to mesh"""
+    print("  Applying material properties...")
+    print(f"    Specular: {specular_strength}")
+    print(f"    Roughness: {roughness}")
+    print(f"    Metallic: {metallic}")
+    print(f"    Clearcoat: {clearcoat}")
+    
+    # Store material properties in mesh
+    mesh['material'] = {
+        'specular_strength': specular_strength,
+        'roughness': roughness,
+        'metallic': metallic,
+        'clearcoat': clearcoat
+    }
+    
+    return mesh
+
+
+def export_textured_model(mesh: dict, output_path: str, texture_size: int = 2048):
+    """Export textured model"""
+    print(f"  Exporting textured model: {output_path}")
+    
+    ext = os.path.splitext(output_path)[1].lower()
+    
+    if ext == '.obj':
+        export_textured_obj(mesh, output_path, texture_size)
+    elif ext == '.glb' or ext == '.gltf':
+        export_textured_glb(mesh, output_path, texture_size)
+    elif ext == '.ply':
+        export_textured_ply(mesh, output_path)
+    else:
+        export_textured_obj(mesh, output_path.replace('.glb', '.obj'), texture_size)
+    
+    print(f"  Textured model exported: {output_path}")
+
+
+def export_textured_obj(mesh: dict, output_path: str, texture_size: int = 2048):
+    """Export textured OBJ model"""
+    vertices = mesh['vertices']
+    faces = mesh['faces']
+    colors = mesh.get('colors')
+    uv_coords = mesh.get('uv_coords')
+    
+    # Generate UV coords if not present
+    if uv_coords is None:
+        uv_coords = generate_uv_coords(vertices, faces)
+    
+    # Create MTL file
+    mtl_path = output_path.replace('.obj', '.mtl')
+    material = mesh.get('material', {})
+    
+    with open(mtl_path, 'w') as f:
+        f.write(f"newmtl car_paint\n")
+        f.write(f"Ka 0.0 0.0 0.0\n")  # Ambient
+        f.write(f"Kd 0.8 0.8 0.8\n")  # Diffuse (white base)
+        f.write(f"Ks {material.get('specular_strength', 0.5):.4f} {material.get('specular_strength', 0.5):.4f} {material.get('specular_strength', 0.5):.4f}\n")  # Specular
+        f.write(f"Ns {(1.0 - material.get('roughness', 0.3)) * 1000:.0f}\n")  # Shininess
+        f.write(f"Ni 1.5\n")  # Index of refraction
+        f.write(f"d 1.0\n")  # Dissolve
+        f.write(f"illum 2\n")  # Model 2 (specular + alpha)
+    
+    # Write OBJ file
+    with open(output_path, 'w') as f:
+        f.write(f"# Textured model with {len(vertices)} vertices\n")
+        f.write(f"mtllib {os.path.basename(mtl_path)}\n")
+        
+        # Write vertices
+        for v in vertices:
+            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+        
+        # Write UV coordinates
+        for uv in uv_coords:
+            f.write(f"vt {uv[0]:.6f} {uv[1]:.6f}\n")
+        
+        # Write normals
+        for i in range(len(vertices)):
+            f.write(f"vn 0.0 1.0 0.0\n")
+        
+        # Write faces with UV and normals
+        f.write(f"usemtl car_paint\n")
+        for face in faces:
+            f.write(f"f {face[0]+1}/{face[0]+1}/{face[0]+1} {face[1]+1}/{face[1]+1}/{face[1]+1} {face[2]+1}/{face[2]+1}/{face[2]+1}\n")
+    
+    print(f"    OBJ file created: {len(vertices)} vertices, {len(faces)} faces")
+
+
+def export_textured_glb(mesh: dict, output_path: str, texture_size: int = 2048):
+    """Export textured GLB model (simplified)"""
     try:
-        import trimesh
-
-        print("[UV Unwrap] Loading mesh...")
-        mesh = trimesh.load(mesh_path)
-
-        num_vertices = len(mesh.vertices)
-        num_faces = len(mesh.faces)
-        print(f"[UV Unwrap] Loaded mesh: {num_vertices} vertices, {num_faces} faces")
-
-        # Check if mesh already has UV coordinates
-        if mesh.visual.uv is not None:
-            print(f"[UV Unwrap] Mesh already has UV coordinates: {mesh.visual.uv.shape}")
-        else:
-            print("[UV Unwrap] Creating UV coordinates...")
-
-            # Use trimesh's built-in UV unwrapping
-            if uv_method == 'angle':
-                # Angle-based unwrapping (best for most cases)
-                print("  Using angle-based unwrapping...")
-                uv = create_angle_based_uv(mesh)
-            elif uv_method == 'lscm':
-                # Least Squares Conformal Mapping
-                print("  Using LSCM unwrapping...")
-                uv = create_lscm_uv(mesh)
-            elif uv_method == 'assimp':
-                # Use ASSIMP's UV unwrapping
-                print("  Using ASSIMP unwrapping...")
-                try:
-                    uv = create_assimp_uv(mesh)
-                except Exception as e:
-                    print(f"  ASSIMP failed: {e}. Falling back to angle-based.")
-                    uv = create_angle_based_uv(mesh)
+        import struct
+        
+        vertices = mesh['vertices']
+        faces = mesh['faces']
+        colors = mesh.get('colors')
+        
+        print("  Creating GLB file (simplified format)...")
+        
+        # Create vertex data
+        vertex_data = []
+        for i in range(len(vertices)):
+            v = vertices[i]
+            vertex_data.extend([float(v[0]), float(v[1]), float(v[2])])
+            
+            if colors is not None and len(colors) > i:
+                c = colors[i]
+                vertex_data.extend([float(c[0])/255.0, float(c[1])/255.0, float(c[2])/255.0])
             else:
-                uv = create_angle_based_uv(mesh)
-
-            mesh.visual.uv = uv
-            print(f"[UV Unwrap] Created UV coordinates: {uv.shape}")
-
-        # Save mesh with UV coordinates
-        mesh_with_uv = mesh_path.replace('.obj', '_uv.obj').replace('.ply', '_uv.ply')
-        mesh.export(mesh_with_uv)
-        print(f"[UV Unwrap] Saved mesh with UVs to: {mesh_with_uv}")
-
-        return mesh_with_uv
-
-    except ImportError:
-        print("[Error] trimesh not installed. Run: pip install trimesh[extras]")
-        return mesh_path
+                vertex_data.extend([0.8, 0.8, 0.8])
+        
+        # Create index data
+        index_data = []
+        for face in faces:
+            index_data.extend([int(face[0]), int(face[1]), int(face[2])])
+        
+        # Save as binary
+        with open(output_path, 'wb') as f:
+            f.write(b'GLB')
+            f.write(struct.pack('<I', len(vertex_data)))
+            f.write(struct.pack('<I', len(index_data)))
+            f.write(struct.pack(f'{len(vertex_data)}f', *vertex_data))
+            f.write(struct.pack(f'{len(index_data)}I', *index_data))
+        
+        print(f"    GLB file created: {len(vertices)} vertices, {len(faces)} faces")
+    
     except Exception as e:
-        print(f"[Warning] UV unwrapping failed: {e}. Continuing without UV changes.")
-        return mesh_path
+        print(f"  [Error] GLB export failed: {e}")
+        # Fallback to OBJ
+        obj_path = output_path.replace('.glb', '.obj').replace('.gltf', '.obj')
+        export_textured_obj(mesh, obj_path, texture_size)
 
 
-def create_angle_based_uv(mesh):
-    """
-    Create UV coordinates using angle-based unwrapping
-
-    This method preserves angles and is suitable for car bodies.
-
-    Args:
-        mesh: trimesh.Trimesh object
-
-    Returns:
-        UV coordinates array (N, 2)
-    """
-    import trimesh
-
-    # Use trimesh's built-in UV mapping
-    # This projects the mesh onto 2D using angle preservation
-    try:
-        uv = trimesh.visual.texture.make_morton_mesh_uv(mesh)
-        print(f"  Created morton-based UV: {uv.shape}")
-        return uv
-    except Exception as e:
-        print(f"  Morton UV failed: {e}")
-
-    # Fallback: spherical/cylindrical projection for car-like shapes
-    print("  Falling back to spherical projection...")
-
-    # Compute bounding box
-    bounds = mesh.bounds
-    center = mesh.centroid
-
-    # Project vertices to UV space
-    vertices = mesh.vertices
-    min_bounds = bounds[0]
-    max_bounds = bounds[1]
-
-    # Normalize to [0, 1] range
-    ranges = max_bounds - min_bounds
-    max_range = np.max(ranges)
-
-    if max_range == 0:
-        return np.zeros((len(vertices), 2))
-
-    uv = np.zeros((len(vertices), 2))
-    uv[:, 0] = (vertices[:, 0] - min_bounds[0]) / max_range
-    uv[:, 1] = (vertices[:, 1] - min_bounds[1]) / max_range
-
-    # Handle edge cases
-    uv = np.clip(uv, 0.0, 1.0)
-
-    print(f"  Created spherical UV: {uv.shape}")
-    return uv
+def export_textured_ply(mesh: dict, output_path: str):
+    """Export textured PLY model"""
+    vertices = mesh['vertices']
+    faces = mesh.get('faces')
+    colors = mesh.get('colors')
+    
+    with open(output_path, 'w') as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {len(vertices)}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        
+        if colors is not None:
+            f.write("property uchar red\n")
+            f.write("property uchar green\n")
+            f.write("property uchar blue\n")
+        
+        f.write("property float nx\n")
+        f.write("property float ny\n")
+        f.write("property float nz\n")
+        f.write("end_header\n")
+        
+        for i, v in enumerate(vertices):
+            line = f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}"
+            
+            if colors is not None and len(colors) > i:
+                c = colors[i]
+                line += f" {int(c[0]):d} {int(c[1]):d} {int(c[2]):d}"
+            
+            line += " 0.0 1.0 0.0\n"
+            f.write(line)
+        
+        if faces is not None:
+            for face in faces:
+                f.write(f"face {face[0]} {face[1]} {face[2]}\n")
+    
+    print(f"    PLY file created: {len(vertices)} vertices")
 
 
-def create_lscm_uv(mesh):
-    """
-    Create UV coordinates using Least Squares Conformal Mapping
-
-    This method minimizes distortion and is good for complex meshes.
-
-    Args:
-        mesh: trimesh.Trimesh object
-
-    Returns:
-        UV coordinates array (N, 2)
-    """
-    import trimesh
-
-    try:
-        # Use trimesh's LSCM implementation
-        uv = trimesh.visual.mapping.lscm(mesh)
-        print(f"  Created LSCM UV: {uv.shape}")
-        return uv
-    except Exception as e:
-        print(f"  LSCM failed: {e}. Falling back to spherical projection.")
-
-    # Fallback to spherical projection
-    vertices = mesh.vertices
-    bounds = mesh.bounds
-    min_bounds = bounds[0]
-    max_bounds = bounds[1]
-    ranges = max_bounds - min_bounds
-    max_range = np.max(ranges)
-
-    if max_range == 0:
-        return np.zeros((len(vertices), 2))
-
-    uv = np.zeros((len(vertices), 2))
-    uv[:, 0] = (vertices[:, 0] - min_bounds[0]) / max_range
-    uv[:, 1] = (vertices[:, 1] - min_bounds[1]) / max_range
-
-    return np.clip(uv, 0.0, 1.0)
-
-
-def create_assimp_uv(mesh):
-    """
-    Create UV coordinates using ASSIMP library
-
-    This is the most accurate method but requires ASSIMP.
-
-    Args:
-        mesh: trimesh.Trimesh object
-
-    Returns:
-        UV coordinates array (N, 2)
-    """
-    import trimesh
-
-    # Try to use ASSIMP's UV unwrapping
-    # This is a placeholder - full implementation requires pyassimp
-    print("  ASSIMP UV unwrapping requires pyassimp package")
-
-    # Fallback to angle-based
-    return create_angle_based_uv(mesh)
-
-
-def bake_textures(mesh_path, output_path, texture_size=2048, source_images=None):
-    """
-    Bake textures from multiple views
-
-    This function creates texture maps from source images
-    by projecting them onto the mesh surface.
-
-    Args:
-        mesh_path: Path to input mesh file
-        output_path: Path for output file
-        texture_size: Texture resolution (default: 2048)
-        source_images: Directory containing source images
-
-    Returns:
-        Path to textured mesh file
-    """
+def texture_baking_pipeline(input_dir: str, output_path: str, 
+                             texture_size: int = 2048,
+                             specular_strength: float = 0.5,
+                             roughness: float = 0.3,
+                             metallic: float = 0.1,
+                             clearcoat: float = 0.5,
+                             source_images: str = None):
+    """Run complete texture baking pipeline"""
     print("=" * 60)
-    print("  Texture Baking")
+    print("  Texture Baking Pipeline")
     print("=" * 60)
-    print(f"  Input: {mesh_path}")
+    print(f"  Input: {input_dir}")
     print(f"  Output: {output_path}")
-    print(f"  Texture size: {texture_size}x{texture_size}")
-
-    try:
-        import trimesh
-
-        print("[Texture Bake] Loading mesh...")
-        mesh = trimesh.load(mesh_path)
-
-        num_vertices = len(mesh.vertices)
-        num_faces = len(mesh.faces)
-        print(f"[Texture Bake] Loaded mesh: {num_vertices} vertices, {num_faces} faces")
-
-        # Try to bake textures from source images
-        if source_images and os.path.exists(source_images):
-            print(f"[Texture Bake] Source images directory: {source_images}")
-            bake_from_images(mesh, source_images, texture_size, output_path)
+    print(f"  Texture Size: {texture_size}")
+    print("")
+    
+    # Step 1: Find model file
+    model_file = find_model_file(input_dir)
+    
+    if model_file is None:
+        # Try input_dir as the file path directly
+        if os.path.exists(input_dir):
+            model_file = input_dir
         else:
-            print("[Texture Bake] No source images provided. Creating basic texture.")
-            create_basic_texture(mesh, texture_size, output_path)
-
-        return output_path
-
-    except ImportError:
-        print("[Error] trimesh not installed. Run: pip install trimesh[extras]")
-        return output_path
-    except Exception as e:
-        print(f"[Warning] Texture baking failed: {e}. Creating basic texture.")
-        return create_basic_texture_fallback(mesh_path, output_path, texture_size)
-
-
-def bake_from_images(mesh, source_images_dir, texture_size, output_path):
-    """
-    Bake textures from multiple source images
-
-    This function projects source images onto the mesh
-    to create a high-quality texture map.
-
-    Args:
-        mesh: trimesh.Trimesh object
-        source_images_dir: Directory containing source images
-        texture_size: Texture resolution
-        output_path: Output file path
-    """
-    import trimesh
-
-    # Find source images
-    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.exr']
-    source_images = []
-    for ext in image_extensions:
-        source_images.extend(glob.glob(os.path.join(source_images_dir, f'*{ext}')))
-        source_images.extend(glob.glob(os.path.join(source_images_dir, f'*{ext.upper()}')))
-
-    if not source_images:
-        print("[Warning] No source images found. Creating basic texture.")
-        create_basic_texture(mesh, texture_size, output_path)
-        return
-
-    print(f"[Texture from Images] Found {len(source_images)} source images")
-
-    # Simple approach: use the average color from images as base texture
-    # For production, use proper multi-view stereo texturing
-
-    # Create a base color texture
-    texture = create_color_texture(mesh, texture_size, source_images)
-
-    # Create normal map if possible
-    try:
-        normal_map = create_normal_map(mesh, source_images, texture_size)
-        if normal_map is not None:
-            print("[Texture Bake] Normal map created")
-    except Exception as e:
-        print(f"[Warning] Normal map creation failed: {e}")
-        normal_map = None
-
-    # Create specular map
-    specular_map = create_specular_map(mesh, texture_size)
-
-    # Apply textures to mesh
-    print("[Texture Bake] Applying textures to mesh...")
-
-    # Create PBR materials
-    pbr_material = trimesh.visual.material.PBRMaterial(
-        baseColorTexture=texture,
-        normalTexture=normal_map if normal_map is not None else None,
-        roughnessFactor=0.3,
-        metallicFactor=0.1,
-        clearcoat=0.5,
-        clearcoatRoughness=0.2
-    )
-
-    mesh.visual = trimesh.visual.TextureVisuals(
-        uv=mesh.visual.uv if hasattr(mesh.visual, 'uv') else None,
-        material=pbr_material
-    )
-
-    # Export with textures
+            print("[Error] No model file found")
+            return None
+    
+    # Step 2: Load model
+    mesh = load_model(model_file)
+    
+    if mesh is None:
+        print("[Error] Failed to load model")
+        return None
+    
+    # Step 3: Generate UV coordinates if not present
+    if mesh.get('uv_coords') is None and mesh.get('faces') is not None:
+        mesh['uv_coords'] = generate_uv_coords(mesh['vertices'], mesh['faces'])
+    
+    # Step 4: Apply material properties
+    mesh = apply_material_properties(mesh, specular_strength, roughness, metallic, clearcoat)
+    
+    # Step 5: Create texture from source images (optional)
+    if source_images:
+        texture = create_texture_from_images(source_images, texture_size)
+        if texture is not None:
+            mesh['texture'] = texture
+            print("  Texture created from source images")
+    
+    # Step 6: Export textured model
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-
-    if output_path.endswith('.glb') or output_path.endswith('.gltf'):
-        mesh.export(output_path)
-        print(f"[Texture Bake] Textured mesh saved to: {output_path}")
-    else:
-        obj_path = output_path.replace('.obj', '_textured.obj')
-        mesh.export(obj_path)
-        print(f"[Texture Bake] Textured mesh saved to: {obj_path}")
-
-
-def create_color_texture(mesh, texture_size, source_images):
-    """
-    Create a color texture from source images
-
-    Args:
-        mesh: trimesh.Trimesh object
-        texture_size: Texture resolution
-        source_images: List of source image paths
-
-    Returns:
-        PIL Image texture
-    """
-    print("  Creating color texture...")
-
-    # Simple approach: create a gradient texture based on vertex colors
-    # or compute average color from source images
-
-    vertices = mesh.vertices
-
-    # Check if mesh has vertex colors
-    if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
-        vc = mesh.visual.vertex_colors
-        print(f"  Using vertex colors: {vc.shape}")
-
-        # Project vertex colors to texture
-        texture = project_vertex_colors_to_texture(mesh, vc, texture_size)
-        return texture
-
-    # Fallback: create a gradient texture
-    print("  No vertex colors found. Creating gradient texture.")
-
-    # Create a simple gradient texture
-    texture = Image.new('RGBA', (texture_size, texture_size))
-    pixels = texture.load()
-
-    for y in range(texture_size):
-        for x in range(texture_size):
-            # Create a subtle gradient
-            r = int(128 + 127 * np.sin(x / texture_size * np.pi))
-            g = int(128 + 127 * np.cos(y / texture_size * np.pi))
-            b = 128
-            a = 255
-            pixels[x, y] = (r, g, b, a)
-
-    return texture
-
-
-def project_vertex_colors_to_texture(mesh, vertex_colors, texture_size):
-    """
-    Project vertex colors onto a 2D texture
-
-    Args:
-        mesh: trimesh.Trimesh object
-        vertex_colors: Vertex color array (N, 4)
-        texture_size: Texture resolution
-
-    Returns:
-        PIL Image texture
-    """
-    import trimesh
-
-    # Use trimesh's texture projection
-    try:
-        texture = trimesh.visual.texture.rasterize(
-            mesh, uv=mesh.visual.uv,
-            texture_size=texture_size
-        )
-        print(f"  Rasterized texture: {texture.shape}")
-        return Image.fromarray(texture)
-    except Exception as e:
-        print(f"  Rasterization failed: {e}")
-
-    # Fallback: create a simple texture
-    texture = Image.new('RGBA', (texture_size, texture_size), (128, 128, 128, 255))
-    return texture
-
-
-def create_normal_map(mesh, source_images, texture_size):
-    """
-    Create a normal map from source images
-
-    Args:
-        mesh: trimesh.Trimesh object
-        source_images: List of source image paths
-        texture_size: Texture resolution
-
-    Returns:
-        PIL Image normal map or None
-    """
-    print("  Creating normal map...")
-
-    # Create a placeholder normal map (flat normal)
-    normal_map = Image.new('RGBA', (texture_size, texture_size), (128, 128, 255, 255))
-
-    # In production, this would compute normals from source images
-    # using multi-view stereo techniques
-
-    print("  Note: Full normal map computation requires multi-view stereo")
-
-    return normal_map
-
-
-def create_specular_map(mesh, texture_size):
-    """
-    Create a specular map for car paint
-
-    Args:
-        mesh: trimesh.Trimesh object
-        texture_size: Texture resolution
-
-    Returns:
-        PIL Image specular map
-    """
-    print("  Creating specular map...")
-
-    # Create a specular map that simulates car paint
-    # High specular in the center, lower at edges
-    specular_map = Image.new('RGBA', (texture_size, texture_size))
-    pixels = specular_map.load()
-
-    center_x = texture_size // 2
-    center_y = texture_size // 2
-    max_dist = np.sqrt(center_x**2 + center_y**2)
-
-    for y in range(texture_size):
-        for x in range(texture_size):
-            dist = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-            spec = int(255 * (1.0 - dist / max_dist))
-            pixels[x, y] = (spec, spec, spec, 255)
-
-    return specular_map
-
-
-def create_basic_texture(mesh, texture_size, output_path):
-    """
-    Create a basic texture without source images
-
-    Args:
-        mesh: trimesh.Trimesh object
-        texture_size: Texture resolution
-        output_path: Output file path
-    """
-    print("[Basic Texture] Creating basic texture...")
-
-    # Create a simple color texture
-    texture = Image.new('RGBA', (texture_size, texture_size), (128, 128, 128, 255))
-
-    # Try to use vertex colors if available
-    if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
-        print("  Using vertex colors for basic texture...")
-        texture = project_vertex_colors_to_texture(mesh, mesh.visual.vertex_colors, texture_size)
-
-    # Save texture
-    texture_path = os.path.join(os.path.dirname(output_path), 'texture.png')
-    texture.save(texture_path)
-    print(f"  Texture saved to: {texture_path}")
-
-    # Export mesh with basic texture
-    if output_path.endswith('.glb') or output_path.endswith('.gltf'):
-        mesh.export(output_path)
-        print(f"  Textured mesh saved to: {output_path}")
-    else:
-        obj_path = output_path.replace('.obj', '_textured.obj')
-        mesh.export(obj_path)
-        print(f"  Textured mesh saved to: {obj_path}")
-
-
-def create_basic_texture_fallback(mesh_path, output_path, texture_size):
-    """
-    Fallback: Create basic texture when main method fails
-
-    Args:
-        mesh_path: Input mesh path
-        output_path: Output file path
-        texture_size: Texture resolution
-
-    Returns:
-        Output file path
-    """
-    try:
-        import trimesh
-
-        print("[Fallback] Creating basic texture...")
-
-        mesh = trimesh.load(mesh_path)
-
-        # Create a simple texture
-        texture = Image.new('RGBA', (texture_size, texture_size), (128, 128, 128, 255))
-        texture_path = os.path.join(os.path.dirname(output_path), 'texture.png')
-        texture.save(texture_path)
-
-        # Export with basic texture
-        if output_path.endswith('.glb') or output_path.endswith('.gltf'):
-            mesh.export(output_path)
-        else:
-            obj_path = output_path.replace('.obj', '_textured.obj')
-            mesh.export(obj_path)
-
-        print(f"  Fallback texture saved to: {output_path}")
-        return output_path
-
-    except Exception as e:
-        print(f"[Error] Fallback texture creation failed: {e}")
-        return output_path
-
-
-def apply_material_properties(output_path, specular_strength=0.5,
-                               roughness=0.3, metallic=0.1,
-                               clearcoat=0.5, normal_strength=1.0):
-    """
-    Apply car-specific PBR material properties
-
-    This function modifies the GLB/OBJ material properties
-    to simulate car paint with clearcoat.
-
-    Args:
-        output_path: Path to mesh file
-        specular_strength: Specular strength (0.0 - 1.0)
-        roughness: Roughness value (0.0 = smooth, 1.0 = rough)
-        metallic: Metallic value (0.0 = non-metal, 1.0 = metal)
-        clearcoat: Clearcoat amount (0.0 = none, 1.0 = full)
-        normal_strength: Normal map strength
-
-    Returns:
-        Path to file with material properties
-    """
-    print("=" * 60)
-    print("  Material Properties (PBR)")
-    print("=" * 60)
-    print(f"  Input: {output_path}")
-    print(f"  Specular strength: {specular_strength}")
-    print(f"  Roughness: {roughness}")
-    print(f"  Metallic: {metallic}")
-    print(f"  Clearcoat: {clearcoat}")
-    print(f"  Normal strength: {normal_strength}")
-
-    try:
-        import trimesh
-
-        print("[Material] Loading mesh...")
-        mesh = trimesh.load(output_path)
-
-        # Update material properties
-        print("[Material] Applying PBR material properties...")
-
-        # Create PBR material with car paint settings
-        pbr_material = trimesh.visual.material.PBRMaterial(
-            baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-            roughnessFactor=roughness,
-            metallicFactor=metallic,
-            clearcoat=clearcoat,
-            clearcoatRoughness=0.2,
-            clearcoatNormalScale=normal_strength,
-            emissiveFactor=[0.0, 0.0, 0.0]
-        )
-
-        # Apply material to mesh
-        if hasattr(mesh.visual, 'uv'):
-            mesh.visual = trimesh.visual.TextureVisuals(
-                uv=mesh.visual.uv,
-                material=pbr_material
-            )
-        else:
-            mesh.visual = trimesh.visual.MaterialVisual(pbr_material)
-
-        print("[Material] Material properties applied successfully")
-
-        # Save updated mesh
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-
-        if output_path.endswith('.glb') or output_path.endswith('.gltf'):
-            mesh.export(output_path)
-            print(f"[Material] Updated mesh saved to: {output_path}")
-        else:
-            final_path = output_path.replace('.obj', '_textured.obj')
-            mesh.export(final_path)
-            print(f"[Material] Updated mesh saved to: {final_path}")
-
-        return output_path
-
-    except ImportError:
-        print("[Error] trimesh not installed. Run: pip install trimesh[extras]")
-        return output_path
-    except Exception as e:
-        print(f"[Warning] Material properties application failed: {e}")
-        return output_path
-
-
-def generate_pbr_textures(mesh_path, output_dir, texture_size=2048):
-    """
-    Generate all PBR texture maps
-
-    This function generates:
-    - Albedo/Color map
-    - Normal map
-    - Roughness map
-    - Metallic map
-    - Specular map
-    - Clearcoat map (for car paint)
-
-    Args:
-        mesh_path: Path to input mesh file
-        output_dir: Directory for output textures
-        texture_size: Texture resolution
-
-    Returns:
-        Dictionary of texture file paths
-    """
-    print("=" * 60)
-    print("  PBR Texture Generation")
-    print("=" * 60)
-    print(f"  Input: {mesh_path}")
-    print(f"  Output directory: {output_dir}")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    try:
-        import trimesh
-
-        mesh = trimesh.load(mesh_path)
-
-        texture_paths = {}
-
-        # Generate albedo map
-        print("  Generating albedo map...")
-        albedo = generate_albedo_map(mesh, texture_size)
-        albedo_path = os.path.join(output_dir, 'albedo.png')
-        albedo.save(albedo_path)
-        texture_paths['albedo'] = albedo_path
-        print(f"    Saved: {albedo_path}")
-
-        # Generate normal map
-        print("  Generating normal map...")
-        normal = generate_normal_map(mesh, texture_size)
-        normal_path = os.path.join(output_dir, 'normal.png')
-        normal.save(normal_path)
-        texture_paths['normal'] = normal_path
-        print(f"    Saved: {normal_path}")
-
-        # Generate roughness map
-        print("  Generating roughness map...")
-        roughness = generate_roughness_map(texture_size)
-        roughness_path = os.path.join(output_dir, 'roughness.png')
-        roughness.save(roughness_path)
-        texture_paths['roughness'] = roughness_path
-        print(f"    Saved: {roughness_path}")
-
-        # Generate metallic map
-        print("  Generating metallic map...")
-        metallic = generate_metallic_map(texture_size)
-        metallic_path = os.path.join(output_dir, 'metallic.png')
-        metallic.save(metallic_path)
-        texture_paths['metallic'] = metallic_path
-        print(f"    Saved: {metallic_path}")
-
-        # Generate clearcoat map (for car paint)
-        print("  Generating clearcoat map...")
-        clearcoat = generate_clearcoat_map(mesh, texture_size)
-        clearcoat_path = os.path.join(output_dir, 'clearcoat.png')
-        clearcoat.save(clearcoat_path)
-        texture_paths['clearcoat'] = clearcoat_path
-        print(f"    Saved: {clearcoat_path}")
-
-        print(f"[PBR Textures] Generated {len(texture_paths)} texture maps")
-
-        return texture_paths
-
-    except Exception as e:
-        print(f"[Error] PBR texture generation failed: {e}")
-        return {}
-
-
-def generate_albedo_map(mesh, texture_size):
-    """Generate albedo/color map"""
-    # Check for vertex colors
-    if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
-        print("    Using vertex colors")
-        return project_vertex_colors_to_texture(mesh, mesh.visual.vertex_colors, texture_size)
-
-    # Create gradient texture
-    texture = Image.new('RGBA', (texture_size, texture_size), (180, 180, 180, 255))
-    return texture
-
-
-def generate_normal_map(mesh, texture_size):
-    """Generate normal map"""
-    # Create flat normal map (pointing outward)
-    texture = Image.new('RGBA', (texture_size, texture_size), (128, 128, 255, 255))
-    return texture
-
-
-def generate_roughness_map(texture_size):
-    """Generate roughness map"""
-    # Create uniform roughness map
-    texture = Image.new('RGBA', (texture_size, texture_size), (80, 80, 80, 255))
-    return texture
-
-
-def generate_metallic_map(texture_size):
-    """Generate metallic map"""
-    # Create uniform metallic map (non-metal for car body)
-    texture = Image.new('RGBA', (texture_size, texture_size), (25, 25, 25, 255))
-    return texture
-
-
-def generate_clearcoat_map(mesh, texture_size):
-    """Generate clearcoat map for car paint"""
-    # Create clearcoat map (higher on top, lower on bottom)
-    texture = Image.new('RGBA', (texture_size, texture_size))
-    pixels = texture.load()
-
-    center_y = texture_size // 2
-
-    for y in range(texture_size):
-        for x in range(texture_size):
-            # Higher clearcoat on top (roof, hood)
-            clearcoat_val = int(200 * (1.0 - y / texture_size))
-            pixels[x, y] = (clearcoat_val, clearcoat_val, clearcoat_val, 255)
-
-    return texture
+    export_textured_model(mesh, output_path, texture_size)
+    
+    print("")
+    print("  Texture baking pipeline complete!")
+    print(f"  Output: {output_path}")
+    
+    return output_path
 
 
 def main():
     args = parse_args()
-
-    print("=" * 60)
-    print("  Texture Baking Pipeline for Car Modeling")
-    print("=" * 60)
-    print("")
-    print(f"  Input: {args.input}")
-    print(f"  Output: {args.output}")
-    print(f"  Texture size: {args.texture_size}")
-    print("")
-
-    # Create output directory
-    output_dir = os.path.dirname(args.output)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    # Step 1: UV Unwrapping
-    print("Step 1: UV Unwrapping")
-    print("-" * 40)
-    uv_path = uv_unwrap(args.input, args.uv_method)
-    print("")
-
-    # Step 2: Texture Baking
-    print("Step 2: Texture Baking")
-    print("-" * 40)
-    baked_path = bake_textures(uv_path, args.output, args.texture_size, args.source_images)
-    print("")
-
-    # Step 3: Apply Material Properties
-    print("Step 3: Material Properties")
-    print("-" * 40)
-    final_output = apply_material_properties(
-        baked_path,
+    
+    result = texture_baking_pipeline(
+        args.input,
+        args.output,
+        args.texture_size,
         args.specular_strength,
         args.roughness,
         args.metallic,
         args.clearcoat,
-        args.normal_strength
+        args.source_images
     )
-    print("")
-
-    # Step 4: Generate PBR Textures (optional)
-    print("Step 4: PBR Texture Generation (Optional)")
-    print("-" * 40)
-    textures_dir = os.path.join(os.path.dirname(args.output), 'textures')
-    texture_paths = generate_pbr_textures(args.input, textures_dir, args.texture_size)
-    print("")
-
-    print("=" * 60)
-    print("  Texture Baking Complete!")
-    print("=" * 60)
-    print(f"  Output: {final_output}")
-
-    if texture_paths:
-        print("  Generated textures:")
-        for name, path in texture_paths.items():
-            if os.path.exists(path):
-                size = os.path.getsize(path)
-                print(f"    {name}: {path} ({size / 1024:.1f} KB)")
+    
+    if result is None:
+        sys.exit(1)
 
 
 if __name__ == '__main__':

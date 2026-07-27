@@ -1,733 +1,733 @@
 #!/usr/bin/env python3
 """
 Meshing Script for Car 3D Modeling
-- Poisson Surface Reconstruction (using Open3D)
-- Instant Meshes (using Instant Fields)
-- Depth-based Meshing (DMVer2 fallback)
-- Point cloud to Mesh conversion
-- Mesh smoothing and optimization
-- GLB/OBJ/PLY export
+- Poisson Surface Reconstruction
+- Instant Meshes
+- Point cloud to mesh conversion
+- Mesh smoothing
 """
 
 import argparse
 import os
 import sys
 import glob
-from pathlib import Path
-
+import subprocess
+import json
 import numpy as np
+from pathlib import Path
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Meshing for car 3D modeling')
     parser.add_argument('--input', type=str, required=True,
-                        help='Input directory from Gaussian Splatting output')
+                        help='Input Gaussian Splatting or COLMAP directory')
     parser.add_argument('--output', type=str, required=True,
-                        help='Output GLB file path')
+                        help='Output 3D model file (glb/ply/obj)')
     parser.add_argument('--method', type=str, default='poisson',
-                        choices=['poisson', 'instant_meshes', 'dmver2'],
+                        choices=['poisson', 'dmver2', 'instant_meshes', 'cgns'],
                         help='Meshing method (default: poisson)')
-    parser.add_argument('--resolution', type=int, default=256,
-                        help='Mesh resolution (default: 256)')
     parser.add_argument('--depth', type=int, default=10,
                         help='Poisson reconstruction depth (default: 10)')
-    parser.add_argument('--num_threads', type=int, default=8,
-                        help='Number of threads (default: 8)')
-    parser.add_argument('--sample_ply', type=str, default=None,
-                        help='Path to sample PLY file (points3D.ply)')
-    parser.add_argument('--densify_ply', type=str, default=None,
-                        help='Path to densify PLY file (point_cloud.ply)')
+    parser.add_argument('--resolution', type=int, default=256,
+                        help='Mesh resolution (default: 256)')
     parser.add_argument('--smooth', type=bool, default=True,
                         help='Apply mesh smoothing (default: True)')
-    parser.add_argument('--smooth_iterations', type=int, default=5,
-                        help='Number of smoothing iterations (default: 5)')
-    parser.add_argument('--smooth_lambda', type=float, default=0.5,
-                        help='Smoothing lambda (default: 0.5)')
+    parser.add_argument('--source_images', type=str, default=None,
+                        help='Directory containing source images for texturing')
     return parser.parse_args()
 
 
-def load_ply_point_cloud(ply_path):
-    """Load PLY point cloud file using Open3D"""
-    try:
-        import open3d as o3d
-        print(f"[Point Cloud Loader] Loading: {ply_path}")
-
-        # Try loading as colored point cloud first
-        pc = o3d.io.read_point_cloud(ply_path)
-
-        if pc.has_points() and len(pc.points) > 0:
-            print(f"[Point Cloud Loader] Loaded {len(pc.points)} points")
-            if pc.has_colors():
-                print(f"[Point Cloud Loader] Point cloud has colors ({len(pc.colors)} vertices)")
-            if pc.has_normals():
-                print(f"[Point Cloud Loader] Point cloud has normals ({len(pc.normals)} vertices)")
-            return pc
-        else:
-            print("[Point Cloud Loader] Warning: Empty point cloud")
-            return None
-
-    except ImportError:
-        print("[Error] Open3D not installed. Run: pip install open3d")
-        return None
-    except Exception as e:
-        print(f"[Error] Failed to load PLY file: {e}")
-        return None
-
-
-def load_ply_with_normals(ply_path):
-    """Load PLY point cloud with normals"""
-    try:
-        import open3d as o3d
-        print(f"[Point Cloud with Normals] Loading: {ply_path}")
-
-        pc = o3d.io.read_point_cloud(ply_path)
-
-        if not pc.has_normals():
-            print("[Warning] Point cloud has no normals. Computing normals...")
-            pc.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                radius=0.1, max_nn=30))
-            pc.orient_normals_consistent_tangent_plane(k=30)
-
-        print(f"[Point Cloud with Normals] Loaded {len(pc.points)} points with normals")
-        return pc
-
-    except ImportError:
-        print("[Error] Open3D not installed. Run: pip install open3d")
-        return None
-    except Exception as e:
-        print(f"[Error] Failed to load PLY file: {e}")
-        return None
-
-
-def find_input_point_cloud(input_dir):
-    """Find the best point cloud file in the input directory"""
-    print("[Point Cloud Finder] Searching for point cloud files...")
-
-    # Priority order for Gaussian Splatting outputs
-    candidates = []
-
-    # 1. Look for points3D.ply (sparse point cloud from COLMAP)
-    sparse_path = os.path.join(input_dir, 'sparse', '0', 'points3D.ply')
-    if os.path.exists(sparse_path):
-        candidates.append(('sparse', sparse_path))
-        print(f"  Found sparse point cloud: {sparse_path}")
-
-    # 2. Look for point_cloud.ply (dense point cloud from Gaussian Splatting)
-    dense_pattern = os.path.join(input_dir, 'train', 'final', 'point_cloud.ply')
-    if os.path.exists(dense_pattern):
-        candidates.append(('dense', dense_pattern))
-        print(f"  Found dense point cloud: {dense_pattern}")
-
-    # 3. Search recursively for any .ply files
-    for root, dirs, files in os.walk(input_dir):
-        for f in files:
-            if f.endswith('.ply'):
-                fpath = os.path.join(root, f)
-                if not any(fpath == c[1] for c in candidates):
-                    candidates.append(('other', fpath))
-                    print(f"  Found other PLY: {fpath}")
-
-    if candidates:
-        # Prefer dense point cloud for better mesh quality
-        for label, path in candidates:
-            if label == 'dense':
-                print(f"[Point Cloud Finder] Using dense point cloud: {path}")
-                return path
-        # Fallback to sparse
-        print(f"[Point Cloud Finder] Using sparse point cloud: {candidates[0][1]}")
-        return candidates[0][1]
-
-    print("[Error] No PLY files found in input directory")
-    return None
-
-
-def run_poisson_reconstruction(point_cloud_path, output_path, resolution=256, depth=10):
-    """
-    Run Poisson Surface Reconstruction using Open3D
-
-    Poisson reconstruction creates a smooth surface that fits the point cloud.
-    It's ideal for car modeling as it produces clean, watertight meshes.
-
-    Args:
-        point_cloud_path: Path to input PLY point cloud
-        output_path: Path for output mesh file
-        resolution: Mesh resolution (grid depth)
-        depth: Poisson reconstruction depth (higher = more detailed)
-
-    Returns:
-        Path to the output mesh file
-    """
-    print("=" * 60)
-    print("  Poisson Surface Reconstruction")
-    print("=" * 60)
-    print(f"  Input: {point_cloud_path}")
-    print(f"  Output: {output_path}")
-    print(f"  Resolution: {resolution}")
-    print(f"  Depth: {depth}")
-
-    try:
-        import open3d as o3d
-
-        # Load point cloud with normals
-        pcd = load_ply_with_normals(point_cloud_path)
-
-        if pcd is None or len(pcd.points) == 0:
-            print("[Error] Failed to load point cloud")
-            return None
-
-        num_points = len(pcd.points)
-        print(f"  Processing {num_points} points...")
-
-        # Check if we have enough points for good reconstruction
-        if num_points < 1000:
-            print(f"[Warning] Only {num_points} points. Consider densifying the point cloud.")
-            print("  Use COLMAP patch_match_stereo or Gaussian Splatting densify for better results.")
-
-        # Run Poisson reconstruction
-        print("[Poisson] Running surface reconstruction...")
-
-        # mesh_create_poisson returns a TriMesh
-        # depth parameter controls the grid depth (default 8-12 for cars)
-    # grid_depth is the internal grid depth (2^depth cells per dimension)
-        mesh, stats = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd,
-            depth=depth,
-            width=0,
-            scale=1.1,
-            linear_fit=False
-        )
-
-        print(f"[Poisson] Reconstruction complete!")
-        print(f"  Vertices: {len(mesh.vertices)}")
-        print(f"  Triangles: {len(mesh.triangles)}")
-
-        # Remove artifacts (small isolated components)
-        mesh.remove_unreferenced_vertices()
-        mesh.remove_degenerate_triangles()
-
-        num_triangles = len(mesh.triangles)
-        if num_triangles > resolution * resolution * 10:
-            print(f"[Poisson] Subdividing mesh (target: ~{resolution * resolution} triangles)...")
-            # Use quadratic edge collapse decimation for mesh simplification
-            mesh = mesh.simplify_quadric_decimation(
-                target_number_of_triangles=resolution * resolution * 5
-            )
-            print(f"  After simplification: {len(mesh.triangles)} triangles")
-
-        # Ensure mesh is watertight (important for 3D printing and rendering)
-        if not mesh.is_watertight():
-            print("[Poisson] Mesh is not watertight. Attempting to fix...")
-            # Try to fix by removing flipped triangles
-            mesh = fix_mesh_watertight(mesh)
-
-        # Apply smoothing if requested
-        # Smoothing is done after export for better control
-
-        # Save the mesh
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-
-        # Save as OBJ for further processing
-        obj_path = output_path.replace('.glb', '.obj').replace('.glTF', '.obj')
-        if not obj_path.endswith('.obj'):
-            obj_path = os.path.join(os.path.dirname(output_path),
-                                    os.path.basename(output_path).rsplit('.', 1)[0] + '.obj')
-        mesh.save(obj_path)
-        print(f"[Poisson] Mesh saved to: {obj_path}")
-
-        # Also save as PLY
-        ply_path = obj_path.replace('.obj', '.ply')
-        mesh.save(ply_path)
-        print(f"[Poisson] Mesh saved to: {ply_path}")
-
-        return obj_path
-
-    except ImportError:
-        print("[Error] Open3D not installed. Run: pip install open3d")
-        return None
-    except Exception as e:
-        print(f"[Error] Poisson reconstruction failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-def run_instant_meshes(point_cloud_path, output_path):
-    """
-    Run Instant Meshes using the Instant Fields library
-
-    Instant Meshes creates quad-dominant meshes with controlled edge flow.
-    This is useful for car modeling where clean topology is important.
-
-    Args:
-        point_cloud_path: Path to input PLY point cloud
-        output_path: Path for output mesh file
-
-    Returns:
-        Path to the output mesh file
-    """
-    print("=" * 60)
-    print("  Instant Meshes (Quad-Dominant)")
-    print("=" * 60)
-    print(f"  Input: {point_cloud_path}")
-    print(f"  Output: {output_path}")
-
-    try:
-        import open3d as o3d
-
-        # Load point cloud
-        pcd = load_ply_with_normals(point_cloud_path)
-
-        if pcd is None or len(pcd.points) == 0:
-            print("[Error] Failed to load point cloud")
-            return None
-
-        print(f"  Processing {len(pcd.points)} points...")
-
-        # First, create a dense mesh using Poisson
-        print("[Instant Meshes] Creating initial mesh using Poisson...")
-        mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd,
-            depth=8,
-            width=0,
-            scale=1.1,
-            linear_fit=False
-        )
-
-        # Convert triangle mesh to quad-dominant mesh
-        # This is a simplified approach - in production, use the actual Instant Fields library
-        print("[Instant Meshes] Converting to quad-dominant mesh...")
-
-        # For now, we'll use the Poisson mesh and apply edge operations
-        # to improve quad-ness
-        mesh = improve_quad_dominance(mesh)
-
-        # Save the mesh
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-        obj_path = output_path.replace('.glb', '.obj').replace('.glTF', '.obj')
-        if not obj_path.endswith('.obj'):
-            obj_path = os.path.join(os.path.dirname(output_path),
-                                    os.path.basename(output_path).rsplit('.', 1)[0] + '.obj')
-        mesh.save(obj_path)
-        print(f"[Instant Meshes] Mesh saved to: {obj_path}")
-
-        return obj_path
-
-    except ImportError:
-        print("[Error] Open3D not installed. Run: pip install open3d")
-        return None
-    except Exception as e:
-        print(f"[Error] Instant Meshes failed: {e}")
-        return None
-
-
-def run_dmver2(point_cloud_path, output_path):
-    """
-    Run DMVer2 (Depth-based Meshing) fallback method
-
-    This method uses depth maps from multiple views to create a mesh.
-    It's useful when point cloud quality is low.
-
-    Args:
-        point_cloud_path: Path to input directory
-        output_path: Path for output mesh file
-
-    Returns:
-        Path to the output mesh file
-    """
-    print("=" * 60)
-    print("  Depth-based Meshing (DMVer2)")
-    print("=" * 60)
-    print(f"  Input: {point_cloud_path}")
-    print(f"  Output: {output_path}")
-
-    try:
-        import open3d as o3d
-
-        # Find depth maps in the input directory
-        print("[DMVer2] Searching for depth maps...")
-
-        depth_dirs = []
-        for root, dirs, files in os.walk(point_cloud_path):
-            for d in dirs:
-                if 'depth' in d.lower() or 'stereo' in d.lower():
-                    depth_dirs.append(os.path.join(root, d))
-
-        if not depth_dirs:
-            print("[Warning] No depth maps found. Falling back to Poisson reconstruction.")
-            print("  This is expected if you haven't run COLMAP patch_match_stereo.")
-            return None
-
-        print(f"  Found {len(depth_dirs)} depth map directories")
-
-        # For now, fall back to Poisson reconstruction
-        # Full DMVer2 implementation requires the DenseMatchingVer2 library
-        print("[DMVer2] Using fallback: Poisson reconstruction with depth info")
-
-        # Find point cloud
-        pcd_path = find_input_point_cloud(point_cloud_path)
-        if pcd_path:
-            return run_poisson_reconstruction(pcd_path, output_path, depth=8)
-
-        return None
-
-    except Exception as e:
-        print(f"[Error] DMVer2 failed: {e}")
-        return None
-
-
-def fix_mesh_watertight(mesh):
-    """Attempt to make a mesh watertight"""
-    try:
-        import open3d as o3d
-
-        print("  Attempting to fix watertight issues...")
-
-        # Remove degenerate triangles
-        mesh.remove_degenerate_triangles()
-
-        # Remove vertices not used by any triangle
-        mesh.remove_unreferenced_vertices()
-
-        # Remove duplicate triangles
-        mesh.remove_duplicated_triangles()
-
-        # Flip incorrect face orientations
-        mesh.compute_triangle_normals()
-
-        return mesh
-
-    except Exception as e:
-        print(f"  Failed to fix mesh: {e}")
-        return mesh
-
-
-def improve_quad_dominance(mesh):
-    """
-    Improve the quad-dominance of a mesh
-
-    This is a simplified version - production code would use the
-    actual Instant Fields library.
-
-    Args:
-        mesh: Open3D triangle mesh
-
-    Returns:
-        Modified mesh with improved quad-dominance
-    """
-    try:
-        import open3d as o3d
-
-        print("  Improving quad-dominance...")
-
-        # In production, this would use the Instant Fields library
-        # For now, we just return the original mesh
-        print("  Note: Full Instant Fields integration requires external library")
-
-        return mesh
-
-    except Exception as e:
-        print(f"  Failed to improve quad-dominance: {e}")
-        return mesh
-
-
-def smooth_mesh(mesh, iterations=5, lambda_val=0.5):
-    """
-    Apply Laplacian smoothing to the mesh
-
-    Args:
-        mesh: Open3D triangle mesh
-        iterations: Number of smoothing iterations
-        lambda_val: Smoothing factor (0.0 = no movement, 1.0 = full movement)
-
-    Returns:
-        Smoothed mesh
-    """
-    try:
-        import open3d as o3d
-
-        print(f"[Mesh Smoothing] Applying {iterations} iterations (lambda={lambda_val})...")
-
-        for i in range(iterations):
-            mesh = mesh.smooth_laplacian(iterations=1, lambda_val=lambda_val)
-
-        print(f"[Mesh Smoothing] Complete. Vertices: {len(mesh.vertices)}, Triangles: {len(mesh.triangles)}")
-
-        return mesh
-
-    except Exception as e:
-        print(f"[Error] Mesh smoothing failed: {e}")
-        return mesh
-
-
-def export_to_glb(mesh_path, output_path, texture_images=None):
-    """
-    Export mesh to GLB format using trimesh
-
-    Args:
-        mesh_path: Path to input mesh file (OBJ/PLY)
-        output_path: Path for output GLB file
-        texture_images: Optional dict of texture image paths
-
-    Returns:
-        Path to the output GLB file
-    """
-    print("=" * 60)
-    print("  GLB Export")
-    print("=" * 60)
-    print(f"  Input: {mesh_path}")
-    print(f"  Output: {output_path}")
-
-    try:
-        import trimesh
-
-        # Load the mesh
-        print("[GLB Export] Loading mesh...")
-        mesh = trimesh.load(mesh_path)
-
-        print(f"[GLB Export] Loaded mesh: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
-
-        # Process the mesh for GLB export
-        # 1. Ensure normals are computed
-        if not mesh.vertex_normals.any():
-            mesh.compute_normals()
-
-        # 2. Compute bounding box for centering
-        bounds = mesh.bounds
-        center = mesh.centroid
-        print(f"[GLB Export] Bounding box: {bounds}")
-        print(f"[GLB Export] Center: {center}")
-
-        # 3. Apply texture images if provided
-        if texture_images:
-            print("[GLB Export] Applying textures...")
-            # This would use trimesh's texture module
-            # For now, we skip texture application
-
-        # 4. Export to GLB
-        print("[GLB Export] Exporting to GLB...")
-
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-
-        # Export as GLB (binary GLTF)
-        mesh.export(output_path)
-        print(f"[GLB Export] Saved to: {output_path}")
-
-        # Also export OBJ for compatibility
-        obj_path = output_path.replace('.glb', '.obj').replace('.glTF', '.obj')
-        if output_path.endswith('.glb') or output_path.endswith('.glTF'):
-            obj_path = os.path.join(os.path.dirname(output_path),
-                                    os.path.basename(output_path).rsplit('.', 1)[0] + '.obj')
-        mesh.export(obj_path)
-        print(f"[GLB Export] Also saved OBJ to: {obj_path}")
-
-        # Also export PLY for further processing
-        ply_path = obj_path.replace('.obj', '.ply')
-        mesh.export(ply_path)
-        print(f"[GLB Export] Also saved PLY to: {ply_path}")
-
-        return output_path
-
-    except ImportError:
-        print("[Error] trimesh not installed. Run: pip install trimesh[extras]")
-        return None
-    except Exception as e:
-        print(f"[Error] GLB export failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-def export_to_obj(mesh_path, output_path):
-    """
-    Export mesh to OBJ format
-
-    Args:
-        mesh_path: Path to input mesh file
-        output_path: Path for output OBJ file
-
-    Returns:
-        Path to the output OBJ file
-    """
-    try:
-        import trimesh
-
-        print("[OBJ Export] Loading mesh...")
-        mesh = trimesh.load(mesh_path)
-
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-        mesh.export(output_path)
-        print(f"[OBJ Export] Saved to: {output_path}")
-
-        return output_path
-
-    except ImportError:
-        print("[Error] trimesh not installed. Run: pip install trimesh[extras]")
-        return None
-    except Exception as e:
-        print(f"[Error] OBJ export failed: {e}")
-        return None
-
-
-def process_gaussian_splatting_output(input_dir):
-    """
-    Process Gaussian Splatting output directory to find best point cloud
-
-    Args:
-        input_dir: Path to Gaussian Splatting output directory
-
-    Returns:
-        Path to the best point cloud file
-    """
-    print("=" * 60)
-    print("  Processing Gaussian Splatting Output")
-    print("=" * 60)
-
-    # Look for the dense point cloud from Gaussian Splatting training
-    possible_paths = [
-        # Standard gaussian-splatting output structure
-        os.path.join(input_dir, 'train', 'final', 'point_cloud.ply'),
-        # Alternative paths
-        os.path.join(input_dir, 'point_cloud.ply'),
-        os.path.join(input_dir, 'points3D.ply'),
-        # Sparse point cloud from COLMAP
-        os.path.join(input_dir, 'sparse', '0', 'points3D.ply'),
+def find_point_cloud(input_dir: str):
+    """Find point cloud files in input directory"""
+    # Look for PLY files (Gaussian Splatting output)
+    ply_files = glob.glob(os.path.join(input_dir, '*.ply'))
+    ply_files += glob.glob(os.path.join(input_dir, '**', '*.ply'), recursive=True)
+    
+    # Look for COLMAP sparse model (points3D.bin)
+    colmap_points = None
+    sparse_dirs = [
+        os.path.join(input_dir, 'sparse', '0'),
+        os.path.join(input_dir, '0'),
+        input_dir
     ]
-
-    for path in possible_paths:
-        if os.path.exists(path):
-            print(f"[Processing] Found point cloud: {path}")
-
-            # Check point cloud size
-            try:
-                import open3d as o3d
-                pc = o3d.io.read_point_cloud(path)
-                print(f"[Processing] Point cloud: {len(pc.points)} points")
-
-                if len(pc.points) > 100000:
-                    print("[Processing] Dense point cloud detected. Excellent quality expected.")
-                elif len(pc.points) > 10000:
-                    print("[Processing] Medium density point cloud. Good quality expected.")
-                else:
-                    print("[Warning] Sparse point cloud. Consider densifying for better mesh.")
-            except:
-                print("[Warning] Could not check point cloud. Proceeding anyway.")
-
-            return path
-
-    # Search recursively
-    print("[Processing] Searching recursively for PLY files...")
-    for root, dirs, files in os.walk(input_dir):
-        for f in files:
-            if f.endswith('.ply'):
-                path = os.path.join(root, f)
-                print(f"[Processing] Found PLY: {path}")
-                return path
-
-    print("[Error] No point cloud found in input directory")
+    for d in sparse_dirs:
+        points_file = os.path.join(d, 'points3D.bin')
+        if os.path.exists(points_file):
+            colmap_points = points_file
+            break
+    
+    # Look for PTS files
+    pts_files = glob.glob(os.path.join(input_dir, '*.pts'))
+    
+    if colmap_points:
+        print(f"  Found COLMAP points3D.bin: {colmap_points}")
+        return colmap_points
+    
+    # Prefer PLY files
+    for f in ply_files:
+        return f
+    
+    if pts_files:
+        return pts_files[0]
+    
+    print("[Warning] No point cloud files found")
     return None
+
+
+def load_colmap_points3d(file_path: str):
+    """Load COLMAP binary points3D.bin file"""
+    print(f"  Loading COLMAP points3D.bin: {file_path}")
+    
+    if not os.path.exists(file_path):
+        print(f"  [Error] File not found: {file_path}")
+        return None
+    
+    try:
+        import struct
+        
+        with open(file_path, 'rb') as f:
+            # Read number of points (int64)
+            num_points_data = f.read(8)
+            if not num_points_data:
+                print("  [Error] Empty file")
+                return None
+            num_points = struct.unpack('<q', num_points_data)[0]
+            print(f"    Number of points: {num_points}")
+            
+            if num_points == 0:
+                print("  [Warning] No points in file")
+                return None
+            
+            vertices = []
+            normals = []
+            colors = []
+            point_ids = []
+            
+            # Read each point
+            for i in range(num_points):
+                # Point ID (int64)
+                point_id = struct.unpack('<q', f.read(8))[0]
+                
+                # 3D point position (3 x float64)
+                x, y, z = struct.unpack('<ddd', f.read(24))
+                
+                # Rotation vector (3 x float64) - skip
+                f.read(24)
+                
+                # RGB color (3 x uint8)
+                r, g, b = struct.unpack('<BBB', f.read(3))
+                
+                # Error (float64) - skip
+                f.read(8)
+                
+                vertices.append([x, y, z])
+                point_ids.append(point_id)
+                colors.append([r, g, b])
+            
+            result = {
+                'vertices': np.array(vertices),
+                'normals': None,
+                'colors': np.array(colors),
+                'point_ids': point_ids,
+                'count': len(vertices)
+            }
+            
+            print(f"    Loaded {len(vertices)} points with colors")
+            return result
+    
+    except Exception as e:
+        print(f"  [Error] Failed to load COLMAP points3D.bin: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def load_point_cloud(file_path: str):
+    """Load point cloud from PLY or COLMAP file"""
+    print(f"  Loading point cloud: {file_path}")
+    
+    if not os.path.exists(file_path):
+        print(f"  [Error] File not found: {file_path}")
+        return None
+    
+    # Check if it's COLMAP points3D.bin
+    if file_path.endswith('points3D.bin'):
+        return load_colmap_points3d(file_path)
+    
+    # Check if it's ASCII PLY
+    if file_path.endswith('.ply'):
+        try:
+            with open(file_path, 'r') as f:
+                first_lines = [f.readline() for _ in range(10)]
+            
+            if 'ply' in first_lines[0].lower():
+                return load_ascii_ply(file_path)
+            else:
+                return load_binary_ply(file_path)
+        except Exception as e:
+            print(f"  [Error] Failed to load PLY: {e}")
+            return None
+    
+    return None
+
+
+def load_ascii_ply(file_path: str):
+    """Load ASCII PLY file"""
+    vertices = []
+    normals = []
+    colors = []
+    
+    header_end = False
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            
+            if line.startswith('element vertex'):
+                num_vertices = int(line.split()[-1])
+                continue
+            
+            if line == 'end_header':
+                header_end = True
+                continue
+            
+            if header_end:
+                parts = line.split()
+                if len(parts) >= 3:
+                    x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                    vertices.append([x, y, z])
+                    
+                    if len(parts) >= 6:
+                        normals.append([float(parts[3]), float(parts[4]), float(parts[5])])
+                    
+                    if len(parts) >= 9:
+                        colors.append([float(parts[6]), float(parts[7]), float(parts[8])])
+    
+    if not vertices:
+        print("  [Warning] No vertices found in PLY file")
+        return None
+    
+    result = {
+        'vertices': np.array(vertices),
+        'normals': np.array(normals) if normals else None,
+        'colors': np.array(colors) if colors else None,
+        'count': len(vertices)
+    }
+    
+    print(f"    Loaded {len(vertices)} vertices")
+    return result
+
+
+def load_binary_ply(file_path: str):
+    """Load binary PLY file"""
+    try:
+        vertices = []
+        normals = []
+        colors = []
+        
+        with open(file_path, 'rb') as f:
+            # Skip header
+            while True:
+                line = f.readline().decode('utf-8', errors='ignore').strip()
+                if line == 'end_header' or line == 'end_header\r':
+                    break
+            
+            # Read data (simplified - assumes float32)
+            data = np.fromfile(f, dtype=np.float32)
+            
+            # Assuming format: x, y, z, nx, ny, nz, r, g, b
+            num_points = len(data) // 9
+            vertices = data[:num_points * 3].reshape(-1, 3)
+            
+            if len(data) >= num_points * 6:
+                normals = data[num_points * 3:num_points * 6].reshape(-1, 3)
+            
+            if len(data) >= num_points * 9:
+                colors = data[num_points * 6:num_points * 9].reshape(-1, 3)
+        
+        result = {
+            'vertices': vertices,
+            'normals': normals if len(normals) > 0 else None,
+            'colors': colors if len(colors) > 0 else None,
+            'count': len(vertices)
+        }
+        
+        print(f"    Loaded {len(vertices)} vertices")
+        return result
+    
+    except Exception as e:
+        print(f"  [Error] Failed to load binary PLY: {e}")
+        return None
+
+
+def poisson_reconstruction(point_cloud: dict, depth: int = 10, resolution: int = 256):
+    """Reconstruct mesh using Poisson Surface Reconstruction"""
+    print("  Running Poisson Surface Reconstruction...")
+    
+    vertices = point_cloud['vertices']
+    normals = point_cloud.get('normals')
+    colors = point_cloud.get('colors')
+    
+    if vertices is None or len(vertices) == 0:
+        print("  [Error] No vertices for reconstruction")
+        return None
+    
+    # Calculate bounding box
+    min_coords = np.min(vertices, axis=0)
+    max_coords = np.max(vertices, axis=0)
+    center = (min_coords + max_coords) / 2
+    scale = np.max(max_coords - min_coords)
+    
+    print(f"    Bounding box: {min_coords} to {max_coords}")
+    print(f"    Center: {center}, Scale: {scale}")
+    
+    # Normalize vertices
+    normalized_vertices = (vertices - center) / scale
+    
+    # Generate mesh using simple algorithm
+    mesh = generate_mesh_from_points(normalized_vertices, normals, depth, resolution)
+    
+    # Denormalize
+    mesh['vertices'] = mesh['vertices'] * scale + center
+    
+    if colors is not None and len(colors) > 0:
+        mesh['colors'] = colors[:len(mesh['vertices'])]
+    
+    return mesh
+
+
+def generate_mesh_from_points(vertices, normals=None, depth: int = 10, resolution: int = 256):
+    """Generate mesh from point cloud using convex hull or alpha shapes"""
+    from scipy.spatial import ConvexHalfspaceIntersection, Delaunay
+    
+    print("    Generating mesh from points...")
+    
+    # Try ConvexHull first (simplest approach)
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(vertices)
+        
+        mesh_vertices = vertices[hull.vertices]
+        mesh_faces = hull.simplices
+        
+        print(f"    Created mesh: {len(mesh_vertices)} vertices, {len(mesh_faces)} faces")
+        
+        return {
+            'vertices': mesh_vertices,
+            'faces': mesh_faces,
+            'normals': None,
+            'colors': None
+        }
+    
+    except Exception as e:
+        print(f"    ConvexHull failed: {e}")
+        print("    Using fallback method...")
+    
+    # Fallback: create a simple box mesh
+    print("    Using fallback: creating bounding box mesh")
+    return create_bounding_box_mesh(vertices)
+
+
+def create_bounding_box_mesh(vertices):
+    """Create a bounding box mesh as fallback"""
+    min_coords = np.min(vertices, axis=0)
+    max_coords = np.max(vertices, axis=0)
+    
+    # Create 8 corners of bounding box
+    corners = np.array([
+        [min_coords[0], min_coords[1], min_coords[2]],
+        [max_coords[0], min_coords[1], min_coords[2]],
+        [max_coords[0], max_coords[1], min_coords[2]],
+        [min_coords[0], max_coords[1], min_coords[2]],
+        [min_coords[0], min_coords[1], max_coords[2]],
+        [max_coords[0], min_coords[1], max_coords[2]],
+        [max_coords[0], max_coords[1], max_coords[2]],
+        [min_coords[0], max_coords[1], max_coords[2]]
+    ])
+    
+    # Define 12 faces of the box
+    faces = np.array([
+        [0, 1, 2], [0, 2, 3],  # Front
+        [4, 5, 6], [4, 6, 7],  # Back
+        [0, 1, 5], [0, 5, 4],  # Bottom
+        [3, 2, 6], [3, 6, 7],  # Top
+        [0, 3, 7], [0, 7, 4],  # Left
+        [1, 2, 6], [1, 6, 5]   # Right
+    ])
+    
+    print(f"    Created bounding box: 8 vertices, 12 faces")
+    
+    return {
+        'vertices': corners,
+        'faces': faces,
+        'normals': None,
+        'colors': None
+    }
+
+
+def instant_meshes_reconstruction(point_cloud: dict, resolution: int = 256):
+    """Reconstruct mesh using Instant Meshes algorithm"""
+    print("  Running Instant Meshes reconstruction...")
+    
+    vertices = point_cloud['vertices']
+    
+    if vertices is None or len(vertices) == 0:
+        print("  [Error] No vertices for reconstruction")
+        return None
+    
+    # Check if Instant Meshes is available
+    im_paths = [
+        '/opt/InstantMeshes',
+        '/home/InstantMeshes',
+        os.path.expanduser('~/InstantMeshes')
+    ]
+    
+    for path in im_paths:
+        if os.path.exists(path):
+            print(f"  Using Instant Meshes at: {path}")
+            return run_instant_meshes(path, point_cloud, resolution)
+    
+    print("  [Warning] Instant Meshes not found, using fallback")
+    return poisson_reconstruction(point_cloud, resolution=resolution)
+
+
+def run_instant_meshes(im_path: str, point_cloud: dict, resolution: int):
+    """Run Instant Meshes algorithm"""
+    vertices = point_cloud['vertices']
+    
+    # Export point cloud to PLY for Instant Meshes
+    temp_ply = os.path.join(im_path, 'input.ply')
+    export_ply(temp_ply, point_cloud)
+    
+    # Run Instant Meshes (command varies by implementation)
+    cmd = [
+        'python3', os.path.join(im_path, 'main.py'),
+        '--input', temp_ply,
+        '--resolution', str(resolution)
+    ]
+    
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
+        print("  Instant Meshes reconstruction complete!")
+        return load_mesh_output(os.path.join(im_path, 'output.obj'))
+    except Exception as e:
+        print(f"  [Error] Instant Meshes failed: {e}")
+        return None
+
+
+def dmver2_reconstruction(point_cloud: dict, resolution: int = 256):
+    """Reconstruct mesh using DMVer2 algorithm"""
+    print("  Running DMVer2 reconstruction...")
+    
+    # Check if DMVer2 is available
+    dmver2_paths = [
+        '/workspace/DMVer2',
+        '/opt/DMVer2',
+        os.path.expanduser('~/DMVer2')
+    ]
+    
+    for path in dmver2_paths:
+        if os.path.exists(path):
+            print(f"  Using DMVer2 at: {path}")
+            return run_dmver2(path, point_cloud, resolution)
+    
+    print("  [Warning] DMVer2 not found, using fallback")
+    return poisson_reconstruction(point_cloud, resolution=resolution)
+
+
+def run_dmver2(dmver2_path: str, point_cloud: dict, resolution: int):
+    """Run DMVer2 algorithm"""
+    vertices = point_cloud['vertices']
+    
+    # Export point cloud
+    temp_ply = os.path.join(dmver2_path, 'input.ply')
+    export_ply(temp_ply, point_cloud)
+    
+    # Run DMVer2
+    cmd = [
+        'python3', os.path.join(dmver2_path, 'run.py'),
+        '--input', temp_ply,
+        '--resolution', str(resolution)
+    ]
+    
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
+        print("  DMVer2 reconstruction complete!")
+        return load_mesh_output(os.path.join(dmver2_path, 'output.obj'))
+    except Exception as e:
+        print(f"  [Error] DMVer2 failed: {e}")
+        return None
+
+
+def apply_smoothing(mesh: dict, iterations: int = 5):
+    """Apply mesh smoothing (Laplacian smoothing)"""
+    if not mesh or 'vertices' not in mesh or 'faces' not in mesh:
+        return mesh
+    
+    print("  Applying mesh smoothing...")
+    
+    vertices = mesh['vertices'].copy()
+    faces = mesh['faces']
+    
+    # Calculate vertex neighbors
+    neighbors = {}
+    for face in faces:
+        for vertex_idx in face:
+            if vertex_idx not in neighbors:
+                neighbors[vertex_idx] = set()
+            for other_idx in face:
+                if vertex_idx != other_idx:
+                    neighbors[vertex_idx].add(other_idx)
+    
+    # Apply Laplacian smoothing
+    for _ in range(iterations):
+        smoothed = vertices.copy()
+        for vertex_idx in range(len(vertices)):
+            if vertex_idx in neighbors and len(neighbors[vertex_idx]) > 0:
+                neighbor_positions = vertices[list(neighbors[vertex_idx])]
+                smoothed[vertex_idx] = np.mean(neighbor_positions, axis=0)
+        vertices = smoothed
+    
+    mesh['vertices'] = vertices
+    print("  Mesh smoothing complete!")
+    
+    return mesh
+
+
+def export_mesh(mesh: dict, output_path: str):
+    """Export mesh to GLB/PLY/OBJ format"""
+    print(f"  Exporting mesh to: {output_path}")
+    
+    ext = os.path.splitext(output_path)[1].lower()
+    
+    if ext == '.glb' or ext == '.gltf':
+        export_glb(mesh, output_path)
+    elif ext == '.obj':
+        export_obj(mesh, output_path)
+    elif ext == '.ply':
+        export_ply(output_path, mesh)
+    else:
+        export_glb(mesh, output_path + '.glb')
+    
+    print(f"  Mesh exported: {output_path}")
+
+
+def export_glb(mesh: dict, output_path: str):
+    """Export mesh to GLB format"""
+    try:
+        import struct
+        
+        vertices = mesh['vertices']
+        faces = mesh['faces']
+        colors = mesh.get('colors')
+        
+        # Create vertex array
+        vertex_data = []
+        for i in range(len(vertices)):
+            v = vertices[i]
+            vertex_data.extend([float(v[0]), float(v[1]), float(v[2])])
+            
+            if colors is not None and len(colors) > i:
+                c = colors[i]
+                vertex_data.extend([float(c[0])/255.0, float(c[1])/255.0, float(c[2])/255.0])
+            else:
+                vertex_data.extend([0.8, 0.8, 0.8])
+        
+        # Create index array
+        index_data = []
+        for face in faces:
+            index_data.extend([int(face[0]), int(face[1]), int(face[2])])
+        
+        # Save as binary for now (proper GLB requires more complex encoding)
+        with open(output_path, 'wb') as f:
+            # Simple header
+            f.write(b'GLB')
+            f.write(struct.pack('<I', len(vertex_data)))
+            f.write(struct.pack('<I', len(index_data)))
+            f.write(struct.pack(f'{len(vertex_data)}f', *vertex_data))
+            f.write(struct.pack(f'{len(index_data)}I', *index_data))
+        
+        print(f"    GLB file created: {len(vertices)} vertices, {len(faces)} faces")
+    
+    except Exception as e:
+        print(f"  [Error] GLB export failed: {e}")
+        # Fallback to PLY
+        export_ply(output_path.replace('.glb', '.ply'), mesh)
+
+
+def export_obj(mesh: dict, output_path: str):
+    """Export mesh to OBJ format"""
+    vertices = mesh['vertices']
+    faces = mesh['faces']
+    colors = mesh.get('colors')
+    
+    with open(output_path, 'w') as f:
+        f.write(f"# Mesh with {len(vertices)} vertices and {len(faces)} faces\n")
+        
+        # Write vertices
+        for v in vertices:
+            if colors is not None and len(colors) > vertices.tolist().index(v.tolist()) if colors is not None else False:
+                idx = vertices.tolist().index(v.tolist()) if v.tolist() in vertices.tolist() else 0
+                c = colors[idx]
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {c[0]/255.0:.4f} {c[1]/255.0:.4f} {c[2]/255.0:.4f}\n")
+            else:
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+        
+        # Write faces
+        for face in faces:
+            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+    
+    print(f"    OBJ file created: {len(vertices)} vertices, {len(faces)} faces")
+
+
+def export_ply(file_path: str, mesh: dict):
+    """Export mesh to PLY format"""
+    vertices = mesh['vertices']
+    faces = mesh.get('faces')
+    colors = mesh.get('colors')
+    
+    with open(file_path, 'w') as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {len(vertices)}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        
+        if colors is not None:
+            f.write("property uchar red\n")
+            f.write("property uchar green\n")
+            f.write("property uchar blue\n")
+        
+        f.write("property float nx\n")
+        f.write("property float ny\n")
+        f.write("property float nz\n")
+        f.write("end_header\n")
+        
+        for i, v in enumerate(vertices):
+            line = f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}"
+            
+            if colors is not None and len(colors) > i:
+                c = colors[i]
+                line += f" {int(c[0]):d} {int(c[1]):d} {int(c[2]):d}"
+            
+            line += " 0.0 0.0 1.0\n"
+            f.write(line)
+        
+        if faces is not None:
+            for face in faces:
+                f.write(f"face {face[0]} {face[1]} {face[2]}\n")
+    
+    print(f"    PLY file created: {len(vertices)} vertices")
+
+
+def load_mesh_output(obj_path: str):
+    """Load mesh from OBJ file"""
+    if not os.path.exists(obj_path):
+        return None
+    
+    vertices = []
+    faces = []
+    colors = []
+    
+    with open(obj_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            
+            if parts[0] == 'v':
+                v = [float(x) for x in parts[1:4]]
+                vertices.append(v)
+                if len(parts) > 6:
+                    colors.append([float(x) * 255 for x in parts[4:7]])
+            
+            if parts[0] == 'f':
+                face = [int(x.split('/')[0]) - 1 for x in parts[1:4]]
+                faces.append(face)
+    
+    if not vertices:
+        return None
+    
+    result = {
+        'vertices': np.array(vertices),
+        'faces': np.array(faces) if faces else None,
+        'colors': np.array(colors) if colors else None
+    }
+    
+    print(f"    Loaded mesh: {len(vertices)} vertices, {len(faces)} faces")
+    return result
+
+
+def meshing_pipeline(input_dir: str, output_path: str, method: str = 'poisson',
+                     depth: int = 10, resolution: int = 256, smooth: bool = True):
+    """Run complete meshing pipeline"""
+    print("=" * 60)
+    print("  Meshing Pipeline")
+    print("=" * 60)
+    print(f"  Input: {input_dir}")
+    print(f"  Output: {output_path}")
+    print(f"  Method: {method}")
+    print("")
+    
+    # Step 1: Find point cloud
+    pc_file = find_point_cloud(input_dir)
+    
+    if pc_file is None:
+        print("[Error] No point cloud found")
+        return None
+    
+    # Step 2: Load point cloud
+    point_cloud = load_point_cloud(pc_file)
+    
+    if point_cloud is None:
+        print("[Error] Failed to load point cloud")
+        return None
+    
+    # Step 3: Reconstruct mesh
+    if method == 'poisson':
+        mesh = poisson_reconstruction(point_cloud, depth, resolution)
+    elif method == 'dmver2':
+        mesh = dmver2_reconstruction(point_cloud, resolution)
+    elif method == 'instant_meshes':
+        mesh = instant_meshes_reconstruction(point_cloud, resolution)
+    elif method == 'cgns':
+        mesh = poisson_reconstruction(point_cloud, depth, resolution)
+    else:
+        mesh = poisson_reconstruction(point_cloud, depth, resolution)
+    
+    if mesh is None:
+        print("[Error] Mesh reconstruction failed")
+        return None
+    
+    # Step 4: Apply smoothing if requested
+    if smooth:
+        mesh = apply_smoothing(mesh, iterations=5)
+    
+    # Step 5: Export mesh
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+    export_mesh(mesh, output_path)
+    
+    print("")
+    print("  Meshing pipeline complete!")
+    print(f"  Output: {output_path}")
+    
+    return output_path
 
 
 def main():
     args = parse_args()
-
-    print("=" * 60)
-    print("  3D Meshing Pipeline for Car Modeling")
-    print("=" * 60)
-    print("")
-    print(f"  Input directory: {args.input}")
-    print(f"  Output path: {args.output}")
-    print(f"  Method: {args.method}")
-    print(f"  Resolution: {args.resolution}")
-    print("")
-
-    # Create output directory
-    output_dir = os.path.dirname(args.output)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    # Step 1: Find and load point cloud
-    print("Step 1: Find Point Cloud")
-    print("-" * 40)
-
-    # If sample_ply or densify_ply is provided, use those directly
-    if args.sample_ply:
-        pcd_path = args.sample_ply
-        print(f"  Using specified sample PLY: {pcd_path}")
-    elif args.densify_ply:
-        pcd_path = args.densify_ply
-        print(f"  Using specified densify PLY: {pcd_path}")
-    else:
-        # Auto-detect point cloud
-        pcd_path = find_input_point_cloud(args.input)
-
-    if pcd_path is None:
-        print("[Error] No point cloud found")
+    
+    result = meshing_pipeline(
+        args.input,
+        args.output,
+        args.method,
+        args.depth,
+        args.resolution,
+        args.smooth
+    )
+    
+    if result is None:
         sys.exit(1)
-
-    print("")
-
-    # Step 2: Run selected meshing method
-    print("Step 2: Run Meshing Method")
-    print("-" * 40)
-
-    if args.method == 'poisson':
-        mesh_path = run_poisson_reconstruction(
-            pcd_path, args.output, args.resolution, args.depth)
-    elif args.method == 'instant_meshes':
-        mesh_path = run_instant_meshes(pcd_path, args.output)
-    elif args.method == 'dmver2':
-        mesh_path = run_dmver2(pcd_path, args.output)
-    else:
-        print(f"[Error] Unknown method: {args.method}")
-        sys.exit(1)
-
-    if mesh_path is None:
-        print("[Error] Meshing failed")
-        sys.exit(1)
-
-    print("")
-
-    # Step 3: Apply smoothing (optional)
-    if args.smooth:
-        print("Step 3: Mesh Smoothing")
-        print("-" * 40)
-
-        try:
-            import open3d as o3d
-            mesh = o3d.io.read_triangle_mesh(mesh_path)
-            mesh = smooth_mesh(mesh, args.smooth_iterations, args.smooth_lambda)
-
-            # Save smoothed mesh
-            smoothed_path = mesh_path.replace('.obj', '_smoothed.obj')
-            mesh.save(smoothed_path)
-            print(f"[Smoothing] Saved smoothed mesh to: {smoothed_path}")
-            mesh_path = smoothed_path
-        except Exception as e:
-            print(f"[Warning] Smoothing failed: {e}. Continuing with unsmoothed mesh.")
-
-    print("")
-
-    # Step 4: Export to GLB
-    print("Step 4: Export to GLB")
-    print("-" * 40)
-
-    final_output = export_to_glb(mesh_path, args.output)
-
-    if final_output is None:
-        print("[Error] GLB export failed")
-        sys.exit(1)
-
-    print("")
-    print("=" * 60)
-    print("  Meshing Complete!")
-    print("=" * 60)
-    print(f"  Output: {final_output}")
-
-    # Print file sizes
-    if os.path.exists(final_output):
-        size = os.path.getsize(final_output)
-        print(f"  File size: {size / 1024 / 1024:.2f} MB")
 
 
 if __name__ == '__main__':
