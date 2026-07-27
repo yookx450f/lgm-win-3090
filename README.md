@@ -94,8 +94,12 @@ lgm-win-3090/
 ├── workspace/             # 作業ディレクトリ
 └── scripts/               # パイプラインスクリプト
     ├── preprocess.py      # 前処理スクリプト
+    ├── colmap.py          # COLMAP処理スクリプト
+    ├── gaussian_splatting.py  # Gaussian Splattingスクリプト
     ├── meshing.py         # メッシュ化スクリプト
-    └── texture_baking.py  # テクスチャベイクスクリプト
+    ├── texture_baking.py  # テクスチャベイクスクリプト
+    ├── blender_video.py   # Blender動画生成スクリプト
+    └── run_pipeline.py    # メインパイプラインスクリプト
 ```
 
 ## セットアップ
@@ -185,6 +189,20 @@ lgm-win-3090/
 - 車体のマスク生成（背景除去）
 - 画像の整列
 
+### [`scripts/colmap.py`](scripts/colmap.py:1)
+COLMAP処理：
+- Structure-from-Motion (SfM)
+- カメラパラメータの推定
+- 疎点群（Sparse Point Cloud）生成
+- 画像間の対応点を検出
+
+### [`scripts/gaussian_splatting.py`](scripts/gaussian_splatting.py:1)
+Gaussian Splatting処理：
+- 3Dガウス分布の最適化
+- 高品質なレンダリング
+- テクスチャの高精度な表現
+- 反射・光沢の再現
+
 ### [`scripts/meshing.py`](scripts/meshing.py:1)
 メッシュ化：
 - Poisson Surface Reconstruction
@@ -197,6 +215,18 @@ lgm-win-3090/
 - テクスチャマッピング
 - 色補正
 - 光沢・反射の処理
+
+### [`scripts/blender_video.py`](scripts/blender_video.py:1)
+Blender動画生成：
+- 複数の3Dモデルを比較
+- YouTube向けの動画を作成
+- アニメーションの追加
+
+### [`scripts/run_pipeline.py`](scripts/run_pipeline.py:1)
+メインパイプラインスクリプト：
+- 全体フローの制御
+- 各ステップのオーケストレーション
+- 単一ステップの実行も可能
 
 ## トラブルシューティング
 
@@ -235,8 +265,12 @@ RTX3090の24GB VRAMを使用するため、以下の設定を確認:
 | [`run_car_model.sh`](run_car_model.sh) | 実行スクリプト |
 | [`.clinerules`](.clinerules) | プロジェクトルール |
 | [`scripts/preprocess.py`](scripts/preprocess.py) | 前処理スクリプト |
+| [`scripts/colmap.py`](scripts/colmap.py) | COLMAP処理スクリプト |
+| [`scripts/gaussian_splatting.py`](scripts/gaussian_splatting.py) | Gaussian Splattingスクリプト |
 | [`scripts/meshing.py`](scripts/meshing.py) | メッシュ化スクリプト |
 | [`scripts/texture_baking.py`](scripts/texture_baking.py) | テクスチャベイクスクリプト |
+| [`scripts/blender_video.py`](scripts/blender_video.py) | Blender動画生成スクリプト |
+| [`scripts/run_pipeline.py`](scripts/run_pipeline.py) | メインパイプラインスクリプト |
 
 ## ライセンス
 

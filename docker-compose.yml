@@ -38,20 +38,22 @@ services:
         python3 /workspace/scripts/preprocess.py --input_dir /workspace/input --output_dir /workspace/workspace/preprocessed &&
         echo '' &&
         echo 'Step 2: COLMAP (Camera estimation & Point cloud)' &&
-        colmap feature_extractor --database_path /workspace/workspace/database --image_path /workspace/workspace/preprocessed &&
-        colmap sequential_mapper --database_path /workspace/workspace/database --image_path /workspace/workspace/preprocessed &&
+        python3 /workspace/scripts/colmap.py --image_path /workspace/workspace/preprocessed --database_path /workspace/workspace/database.db --output_path /workspace/workspace/colmap_output &&
         echo '' &&
         echo 'Step 3: Dense Reconstruction (Multi-view Stereo)' &&
-        colmap patch_match_stereo --workspace_path /workspace/workspace/stereo &&
+        colmap patch_match_stereo --workspace_path /workspace/workspace/stereo --database_path /workspace/workspace/database.db &&
         echo '' &&
         echo 'Step 4: Gaussian Splatting (High-quality 3D reconstruction)' &&
-        python3 /workspace/gaussian-splatting/train.py --source /workspace/workspace/colmap_output &&
+        python3 /workspace/scripts/gaussian_splatting.py --source /workspace/workspace/colmap_output --output_path /workspace/workspace/gaussian_splatting_output &&
         echo '' &&
         echo 'Step 5: Meshing (Poisson / Instant Meshes)' &&
         python3 /workspace/scripts/meshing.py --input /workspace/workspace/gaussian_splatting_output --output /workspace/output/model.glb &&
         echo '' &&
         echo 'Step 6: Texture Baking' &&
         python3 /workspace/scripts/texture_baking.py --input /workspace/output/model.glb --output /workspace/output/model_textured.glb &&
+        echo '' &&
+        echo 'Step 7: Video Generation (Car comparison)' &&
+        python3 /workspace/scripts/blender_video.py --models_dir /workspace/output --output_video /workspace/output/car_comparison.mp4 &&
         echo '' &&
         echo '=========================================' &&
         echo '  Processing Complete!' &&
