@@ -56,18 +56,21 @@ RUN pip3 install --no-cache-dir torch torchvision torchaudio \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
 # Install additional Python dependencies
+# Note: trimesh[extras] includes support for glb, obj, ply, and other 3D formats
 RUN pip3 install --no-cache-dir \
     numpy \
     opencv-python \
     Pillow \
-    trimesh \
+    trimesh[extras] \
     pyvista \
     open3d \
     scikit-image \
     scipy \
     matplotlib \
     tqdm \
-    tqdm
+    imageio \
+    imageio-ffmpeg \
+    joblib
 
 # Install 3D Gaussian Splatting dependencies
 # Git clone 3D Gaussian Splatting repository

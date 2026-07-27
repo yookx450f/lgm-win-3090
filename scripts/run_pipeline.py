@@ -31,11 +31,29 @@ def parse_args():
     parser.add_argument('--mesh_method', type=str, default='poisson',
                         choices=['poisson', 'instant_meshes', 'dmver2'],
                         help='Meshing method (default: poisson)')
+    parser.add_argument('--mesh_depth', type=int, default=10,
+                        help='Poisson reconstruction depth (default: 10)')
+    parser.add_argument('--mesh_resolution', type=int, default=256,
+                        help='Mesh resolution (default: 256)')
+    parser.add_argument('--mesh_smooth', type=bool, default=True,
+                        help='Apply mesh smoothing (default: True)')
     parser.add_argument('--animation_type', type=str, default='orbit',
                         choices=['orbit', 'pan', 'fly_through', 'comparison'],
                         help='Animation type for video (default: orbit)')
     parser.add_argument('--video_duration', type=float, default=10.0,
                         help='Video duration in seconds (default: 10.0)')
+    parser.add_argument('--texture_size', type=int, default=2048,
+                        help='Texture resolution (default: 2048)')
+    parser.add_argument('--specular_strength', type=float, default=0.5,
+                        help='Specular strength (default: 0.5)')
+    parser.add_argument('--roughness', type=float, default=0.3,
+                        help='Roughness value (default: 0.3)')
+    parser.add_argument('--metallic', type=float, default=0.1,
+                        help='Metallic value (default: 0.1)')
+    parser.add_argument('--clearcoat', type=float, default=0.5,
+                        help='Clearcoat value for car paint (default: 0.5)')
+    parser.add_argument('--source_images', type=str, default=None,
+                        help='Directory containing source images for texturing')
     return parser.parse_args()
 
 
@@ -194,7 +212,8 @@ def run_gaussian_splatting(colmap_output, output_dir):
         return None
 
 
-def run_meshing(gs_output, output_path, method='poisson'):
+def run_meshing(gs_output, output_path, method='poisson',
+                depth=10, resolution=256, smooth=True):
     """Run meshing step"""
     print("=" * 60)
     print("  Step 5: Meshing")
@@ -205,7 +224,10 @@ def run_meshing(gs_output, output_path, method='poisson'):
         'python3', script,
         '--input', gs_output,
         '--output', output_path,
-        '--method', method
+        '--method', method,
+        '--depth', str(depth),
+        '--resolution', str(resolution),
+        '--smooth', str(smooth).lower()
     ]
     
     print(f"  Command: {' '.join(cmd)}")
@@ -219,10 +241,14 @@ def run_meshing(gs_output, output_path, method='poisson'):
         return output_path
     except subprocess.CalledProcessError as e:
         print(f"[Error] Meshing failed: {e}")
+        if e.stderr:
+            print(e.stderr)
         return None
 
 
-def run_texture_baking(mesh_path, output_path):
+def run_texture_baking(mesh_path, output_path, texture_size=2048,
+                       specular_strength=0.5, roughness=0.3,
+                       metallic=0.1, clearcoat=0.5, source_images=None):
     """Run texture baking step"""
     print("=" * 60)
     print("  Step 6: Texture Baking")
@@ -232,8 +258,16 @@ def run_texture_baking(mesh_path, output_path):
     cmd = [
         'python3', script,
         '--input', mesh_path,
-        '--output', output_path
+        '--output', output_path,
+        '--texture_size', str(texture_size),
+        '--specular_strength', str(specular_strength),
+        '--roughness', str(roughness),
+        '--metallic', str(metallic),
+        '--clearcoat', str(clearcoat)
     ]
+    
+    if source_images:
+        cmd.extend(['--source_images', source_images])
     
     print(f"  Command: {' '.join(cmd)}")
     print("")
@@ -246,6 +280,8 @@ def run_texture_baking(mesh_path, output_path):
         return output_path
     except subprocess.CalledProcessError as e:
         print(f"[Error] Texture baking failed: {e}")
+        if e.stderr:
+            print(e.stderr)
         return None
 
 
@@ -337,14 +373,21 @@ def main():
     
     if current_step in ['all', 'meshing']:
         print("")
-        mesh_result = run_meshing(gs_output_dir, mesh_output_path, args.mesh_method)
+        mesh_result = run_meshing(
+            gs_output_dir, mesh_output_path,
+            args.mesh_method, args.mesh_depth,
+            args.mesh_resolution, args.mesh_smooth)
         if not mesh_result:
             print("[Warning] Meshing failed, continuing...")
     
     if current_step in ['all', 'texture_baking']:
         print("")
         if os.path.exists(mesh_output_path):
-            texture_result = run_texture_baking(mesh_output_path, textured_output_path)
+            texture_result = run_texture_baking(
+                mesh_output_path, textured_output_path,
+                args.texture_size, args.specular_strength,
+                args.roughness, args.metallic, args.clearcoat,
+                args.source_images)
             if not texture_result:
                 print("[Warning] Texture baking failed, continuing...")
         else:

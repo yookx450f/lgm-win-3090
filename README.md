@@ -183,6 +183,38 @@ lgm-win-3090/
 
 ## パイプラインスクリプト
 
+### 使用可能なパラメータ
+
+```bash
+python3 scripts/run_pipeline.py \
+    --input_dir ./input \
+    --output_dir ./output \
+    --step all \
+    --mesh_method poisson \
+    --mesh_depth 10 \
+    --mesh_resolution 256 \
+    --mesh_smooth True \
+    --texture_size 2048 \
+    --specular_strength 0.5 \
+    --roughness 0.3 \
+    --metallic 0.1 \
+    --clearcoat 0.5 \
+    --source_images ./input
+```
+
+| パラメータ | 説明 | 既定値 |
+|-----------|------|--------|
+| `--mesh_method` | メッシュ化手法 | `poisson` |
+| `--mesh_depth` | Poisson再構築の深さ | `10` |
+| `--mesh_resolution` | メッシュ解像度 | `256` |
+| `--mesh_smooth` | メッシュ平滑化 | `True` |
+| `--texture_size` | テクスチャ解像度 | `2048` |
+| `--specular_strength` | 鏡面反射強度 | `0.5` |
+| `--roughness` | 粗さ（0.0 = 滑らか） | `0.3` |
+| `--metallic` | 金属度（0.0 = 非金属） | `0.1` |
+| `--clearcoat` | クリアコート量（車のクリアー層） | `0.5` |
+| `--source_images` | テクスチャ生成用の元画像ディレクトリ | `None` |
+
 ### [`scripts/preprocess.py`](scripts/preprocess.py:1)
 画像の前処理：
 - 画像の正規化
@@ -205,16 +237,43 @@ Gaussian Splatting処理：
 
 ### [`scripts/meshing.py`](scripts/meshing.py:1)
 メッシュ化：
-- Poisson Surface Reconstruction
-- Instant Meshes
-- 点群 → メッシュ（Mesh）化
+- **Poisson Surface Reconstruction**（Open3D使用）
+  - 点群から滑らかなサーフェスを構築
+  - depthパラメータで詳細度を制御（デフォルト: 10）
+  - メッシュの簡素化（quadric decimation）
+- **Instant Meshes**（Quad-Dominant）
+  - 四辺形優位のメッシュを生成
+  - 車のトポロジー最適化
+- **DMVer2**（Depth-based Meshing）
+  - 深度マップからのメッシュ生成
+  - ポイントクオリティが低い場合のフォールバック
+- **メッシュ平滑化**
+  - Laplacian平滑化（イテレーション数、lambda値を指定可能）
+- **出力形式**
+  - GLB（バイナリGLTF、YouTube向け）
+  - OBJ（オープンフォーマット）
+  - PLY（ポイントクラウド/メッシュ）
 
 ### [`scripts/texture_baking.py`](scripts/texture_baking.py:1)
 テクスチャベイク：
-- UV展開
-- テクスチャマッピング
-- 色補正
-- 光沢・反射の処理
+- **UV展開**
+  - Angle-based unwrapping（角度保存）
+  - LSCM（最小二乗 conformal mapping）
+  - Morton orderingに基づく投影
+- **テクスチャマッピング**
+  - ポリゴンカラーからテクスチャをラスタライズ
+  - 複数画像からの投影（マルチビューステレオ）
+- **PBRマテリアル**
+  - Base Color/Albedo map
+  - Normal map
+  - Roughness/Metallic maps
+  - Clearcoat map（車のクリアークラース再現）
+  - Specular map
+- **光沢・反射の処理**
+  - Specular strength（0.0 - 1.0）
+  - Roughness（0.0 = 滑らか, 1.0 = 粗い）
+  - Metallic（0.0 = 非金属, 1.0 = 金属）
+  - Clearcoat（車のクリアーコート層）
 
 ### [`scripts/blender_video.py`](scripts/blender_video.py:1)
 Blender動画生成：
