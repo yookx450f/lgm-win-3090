@@ -79,6 +79,16 @@ RUN pip3 install --no-cache-dir \
     python-multipart \
     aiofiles
 
+# Install testing dependencies
+RUN pip3 install --no-cache-dir \
+    pytest \
+    pytest-asyncio \
+    pytest-cov \
+    pytest-mock \
+    black \
+    flake8 \
+    isort
+
 # Install 3D Gaussian Splatting dependencies
 # Git clone 3D Gaussian Splatting repository
 RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting 2>/dev/null || true

@@ -356,6 +356,72 @@ Blender動画生成：
 - 各ステップのオーケストレーション
 - 単一ステップの実行も可能
 
+## テスト
+
+### テストファイル構成
+
+```
+tests/
+├── __init__.py            # テストパッケージ
+├── conftest.py            # 共通フィクスチャ
+├── test_preprocess.py     # 前処理テスト
+├── test_colmap.py         # COLMAPテスト
+├── test_gaussian_splatting.py   # Gaussian Splattingテスト
+├── test_meshing.py        # メッシュ化テスト
+├── test_texture_baking.py     # テクスチャベイクテスト
+├── test_blender_video.py      # Blender動画生成テスト
+├── test_run_pipeline.py     # パイプラインテスト
+└── test_app_main.py       # Web APIテスト
+```
+
+### テストの実行方法
+
+```bash
+# すべてのテストを実行
+python -m pytest tests/ -v
+
+# 特定モジュールのテストのみを実行
+python -m pytest tests/test_preprocess.py -v
+python -m pytest tests/test_colmap.py -v
+python -m pytest tests/test_meshing.py -v
+
+# カバレッジ付きで実行
+python -m pytest tests/ -v --cov=scripts --cov=app --cov-report=html
+
+# クイックテスト（マーク付き）
+python -m pytest tests/ -v -m unit
+
+# Dockerコンテナ内でテストを実行
+docker compose exec car-model pytest tests/ -v
+```
+
+### テストカバレッジ対象モジュール
+
+| モジュール | テストファイル | 主要内容 |
+|-----------|---------------|----------|
+| [`scripts/preprocess.py`](scripts/preprocess.py) | [`tests/test_preprocess.py`](tests/test_preprocess.py) | 画像正規化、背景除去、アライメント |
+| [`scripts/colmap.py`](scripts/colmap.py) | [`tests/test_colmap.py`](tests/test_colmap.py) | カメラ推定、点群読み込み、PLY形式 |
+| [`scripts/gaussian_splatting.py`](scripts/gaussian_splatting.py) | [`tests/test_gaussian_splatting.py`](tests/test_gaussian_splatting.py) | 空間設定、設定生成、合成出力 |
+| [`scripts/meshing.py`](scripts/meshing.py) | [`tests/test_meshing.py`](tests/test_meshing.py) | ポアソン再構築、メッシュ出力、平滑化 |
+| [`scripts/texture_baking.py`](scripts/texture_baking.py) | [`tests/test_texture_baking.py`](tests/test_texture_baking.py) | UV展開、マテリアル、テクスチャ出力 |
+| [`scripts/blender_video.py`](scripts/blender_video.py) | [`tests/test_blender_video.py`](tests/test_blender_video.py) | モデル探索、Blenderスクリプト生成 |
+| [`scripts/run_pipeline.py`](scripts/run_pipeline.py) | [`tests/test_run_pipeline.py`](tests/test_run_pipeline.py) | パイプライン各ステップ |
+| [`app/main.py`](app/main.py) | [`tests/test_app_main.py`](tests/test_app_main.py) | FastAPIエンドポイント、Pydanticモデル |
+
+### 共通フィクスチャ（conftest.py）
+
+テストで使用する共通のフィクスチャ:
+
+- `temp_dir`: 一時的ディレクトリ
+- `sample_image_dir`: サンプル画像ディレクトリ
+- `sample_colmap_dir`: COLMAP出力ディレクトリ
+- `sample_gs_output_dir`: Gaussian Splatting出力ディレクトリ
+- `sample_mesh_dir`: メッシュ出力ディレクトリ
+- `sample_models_dir`: 3Dモデルディレクトリ
+- `colmap_points_data`: COLMAP points3D.binバイナリデータ
+- `ascii_ply_content`: ASCII PLYファイル内容
+- `mesh_data`: サンプルメッシュデータ
+
 ## トラブルシューティング
 
 ### GPUが認識されない
