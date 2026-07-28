@@ -188,12 +188,77 @@ end_header
 
 @pytest.fixture
 def mesh_data():
-    """Create sample mesh data dictionary"""
+    """Create sample mesh data dictionary with sufficient vertices and faces for validation
+    
+    This fixture creates a mesh that meets the minimum validation requirements:
+    - MIN_VERTEX_COUNT = 100 vertices
+    - MIN_FACE_COUNT = 200 faces
+    - MIN_FILE_SIZE = 10240 bytes (10KB minimum for valid car model)
+    """
     import numpy as np
+    
+    # Create a larger grid of vertices (20x20 = 400 vertices) to ensure file size > 10KB
+    vertices = []
+    grid_size = 20
+    for i in range(grid_size):
+        for j in range(grid_size):
+            x = i / (grid_size - 1) * 4.0 - 2.0  # -2.0 to 2.0 (larger car proportions)
+            y = j / (grid_size - 1) * 2.0 - 1.0  # -1.0 to 1.0
+            # Add car-like shape with hood, cabin, trunk slopes
+            z_frac = (i / (grid_size - 1))  # 0 to 1 along length
+            
+            # Base height
+            z = 0.0
+            
+            # Hood slope (front, 0-25%)
+            if z_frac < 0.25:
+                hood_frac = z_frac / 0.25
+                z = 0.3 * (1 - hood_frac)  # Slopes up towards cabin
+            # Cabin area (25-75%)
+            elif z_frac < 0.75:
+                cabin_frac = (z_frac - 0.25) / 0.50
+                # Windshield (front 15% of cabin)
+                if cabin_frac < 0.15:
+                    ws_frac = cabin_frac / 0.15
+                    z = 0.3 + 0.5 * ws_frac  # Slopes up
+                # Roof (middle 70%)
+                elif cabin_frac < 0.85:
+                    z = 0.8  # Roof height
+                # Rear window (back 15%)
+                else:
+                    rw_frac = (cabin_frac - 0.85) / 0.15
+                    z = 0.8 - 0.3 * rw_frac  # Slopes down
+            # Trunk (75-100%)
+            else:
+                trunk_frac = (z_frac - 0.75) / 0.25
+                z = 0.5 + 0.3 * trunk_frac  # Slopes down to trunk
+            
+            vertices.append([x, z, y])
+    
+    vertices = np.array(vertices, dtype=float)
+    
+    # Create faces (18x18 grid = 324 quads = 648 triangles)
+    faces = []
+    for i in range(grid_size - 1):
+        for j in range(grid_size - 1):
+            v0 = i * grid_size + j
+            v1 = v0 + 1
+            v2 = v0 + grid_size
+            v3 = v2 + 1
+            
+            # Two triangles per quad
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+    
+    faces = np.array(faces, dtype=int)
+    
+    # Create colors matching vertex count
+    colors = np.tile([255, 128, 64], (len(vertices), 1)).astype(int)
+    
     return {
-        'vertices': np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=float),
-        'faces': np.array([[0, 1, 2], [0, 2, 3]], dtype=int),
-        'colors': np.array([[255, 255, 255], [128, 128, 128], [64, 64, 64], [255, 128, 64]], dtype=int),
+        'vertices': vertices,
+        'faces': faces,
+        'colors': colors,
         'normals': None,
         'material': {
             'specular_strength': 0.5,

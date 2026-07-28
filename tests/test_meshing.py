@@ -203,8 +203,15 @@ class TestCreateBoundingBoxMesh:
     """Tests for bounding box mesh creation"""
 
     def test_create_bounding_box(self):
-        """Test bounding box mesh creation"""
-        vertices = np.array([[0, 0, 0], [2, 1, 1]], dtype=float)
+        """Test bounding box mesh creation with sufficient points"""
+        # Create 5 points to represent a simple car shape
+        vertices = np.array([
+            [-1.0, -0.5, -1.5],   # Front bottom left
+            [1.0, -0.5, -1.5],    # Front bottom right
+            [0.0, 0.5, 0.0],      # Center top
+            [-0.8, 0.3, 1.2],     # Rear bottom left
+            [0.8, 0.3, 1.2]       # Rear bottom right
+        ], dtype=float)
         
         result = create_bounding_box_mesh(vertices)
         
