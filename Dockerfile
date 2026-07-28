@@ -91,7 +91,14 @@ RUN pip3 install --no-cache-dir \
 
 # Install 3D Gaussian Splatting dependencies
 # Git clone 3D Gaussian Splatting repository
-RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting 2>/dev/null || true
+RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting && \
+    cd /workspace/gaussian-splatting && \
+    git submodule update --init --recursive && \
+    pip3 install --no-cache-dir -r requirements.txt && \
+    cd submodules/diff-rasterizer && \
+    pip3 install --no-cache-dir . && \
+    cd ../submodules/point-cloud-layers && \
+    pip3 install --no-cache-dir .
 
 # Install COLMAP from binary release (with retry logic and fallback)
 WORKDIR /tmp

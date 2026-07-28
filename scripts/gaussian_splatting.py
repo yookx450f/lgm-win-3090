@@ -171,23 +171,70 @@ def run_gaussian_splatting_workspace(config: dict, params: dict):
         return create_synthetic_gs_output(model_dir, output_path, params)
     
     print("  Starting Gaussian Splatting training...")
+    print(f"    Model directory: {model_dir}")
+    print(f"    Images directory: {images_dir}")
+    print(f"    Output directory: {output_path}")
+    print(f"    SH degree: {params['sh_degree']}")
+    print(f"    Iterations: {params['iterations']}")
     
+    # Copy COLMAP model to output directory for Gaussian Splatting
+    import shutil
+    gs_source_dir = os.path.join(output_path, 'input')
+    os.makedirs(gs_source_dir, exist_ok=True)
+    
+    # Copy sparse model
+    sparse_src = os.path.join(model_dir)
+    sparse_dst = os.path.join(gs_source_dir, 'sparse')
+    if os.path.exists(sparse_src):
+        if os.path.exists(sparse_dst):
+            shutil.rmtree(sparse_dst)
+        shutil.copytree(sparse_src, sparse_dst)
+    
+    # Copy images
+    images_src = images_dir
+    images_dst = os.path.join(gs_source_dir, 'images')
+    if os.path.exists(images_src):
+        if os.path.exists(images_dst):
+            shutil.rmtree(images_dst)
+        shutil.copytree(images_src, images_dst)
+    
+    # Build command with correct arguments for 3D Gaussian Splatting
     cmd = [
         'python3', training_script,
-        '-s', model_dir,
-        '-i', images_dir,
-        '-o', output_path,
-        '-s', str(params['sh_degree']),
+        '-s', gs_source_dir,
         '--iterations', str(params['iterations']),
-        '--resolution', str(params['resolution'])
+        '--sh_degree', str(params['sh_degree']),
+        '--resolution', str(params['resolution']),
+        '--white_background',  # Better for car modeling
+        '--use_depth', '1' if params.get('use_depth') else '0',
+        '--use_normals', '1' if params.get('use_normals') else '0',
+        '--device', 'cuda' if params.get('device') == 'cuda' else 'cpu'
     ]
     
+    # Add GPU device if specified
+    if params.get('cuda_device', 0) >= 0:
+        cmd.extend(['--CUDA_VISIBLE_DEVICES', str(params['cuda_device'])])
+    
+    env = os.environ.copy()
+    env['QT_QPA_PLATFORM'] = 'offscreen'
+    
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                               timeout=7200, env=env, cwd=gs_workspace)
         print("  Gaussian Splatting training complete!")
+        
+        # Copy results to output directory
+        result_ply = os.path.join(gs_source_dir, 'point_cloud', 'iteration-' + str(params['iterations']), 'point_cloud.ply')
+        if os.path.exists(result_ply):
+            dest_ply = os.path.join(output_path, 'point_cloud.ply')
+            shutil.copy2(result_ply, dest_ply)
+            print(f"    PLY file saved: {dest_ply}")
+        
         return output_path
     except subprocess.CalledProcessError as e:
         print(f"  [Error] Gaussian Splatting training failed: {e}")
+        if e.stderr:
+            print(f"  stderr: {e.stderr[:1000]}")
         return create_synthetic_gs_output(model_dir, output_path, params)
     except subprocess.TimeoutExpired:
         print("  [Warning] Gaussian Splatting training timed out")
