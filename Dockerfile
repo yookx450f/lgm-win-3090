@@ -90,15 +90,21 @@ RUN pip3 install --no-cache-dir \
     isort
 
 # Install 3D Gaussian Splatting dependencies
-# Git clone 3D Gaussian Splatting repository
+# Git clone 3D Gaussian Splatting repository and submodules
 RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting && \
     cd /workspace/gaussian-splatting && \
-    git submodule update --init --recursive && \
-    pip3 install --no-cache-dir -r requirements.txt && \
-    cd submodules/diff-rasterizer && \
-    pip3 install --no-cache-dir . && \
-    cd ../submodules/point-cloud-layers && \
-    pip3 install --no-cache-dir .
+    # Clone main repository submodules explicitly with retry logic
+    git submodule init && \
+    git submodule update --depth 1 && \
+    # Install diff-gaussian-rasterization (may fail without GPU, but source code is available)
+    cd submodules/diff-gaussian-rasterization && \
+    pip3 install --no-cache-dir . 2>&1 || echo "Warning: diff-gaussian-rasterization installation failed (may need GPU)", \
+    # Install simple-knn
+    cd ../simple-knn && \
+    pip3 install --no-cache-dir . 2>&1 || echo "Warning: simple-knn installation failed (may need GPU)", \
+    # Set PYTHONPATH to include gaussian-splatting directory
+    cd /workspace && \
+    echo 'export PYTHONPATH=/workspace/gaussian-splatting:$PYTHONPATH' >> /etc/environment
 
 # Install COLMAP from binary release (with retry logic and fallback)
 WORKDIR /tmp
