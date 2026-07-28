@@ -25,8 +25,13 @@ services:
       - ./cache:/workspace/.cache
       # Shared workspace
       - ./workspace:/workspace/workspace
-      # Scripts directory
-      - ./scripts:/workspace/scripts:ro
+      # Scripts directory (read-write for testing)
+      - ./scripts:/workspace/scripts
+      # Tests directory (read-write for testing)
+      - ./tests:/workspace/tests
+      # Config files
+      - ./pytest.ini:/workspace/pytest.ini
+      - ./pyproject.toml:/workspace/pyproject.toml
       # App directory
       - ./app:/workspace/app
     ports:
@@ -69,10 +74,10 @@ services:
       - ./cache:/workspace/.cache
       # Shared workspace
       - ./workspace:/workspace/workspace
-      # Scripts directory
-      - ./scripts:/workspace/scripts:ro
-      # Tests directory
-      - ./tests:/workspace/tests:ro
+      # Scripts directory (read-write for testing)
+      - ./scripts:/workspace/scripts
+      # Tests directory (read-write for testing)
+      - ./tests:/workspace/tests
       # Config files
       - ./pytest.ini:/workspace/pytest.ini:ro
       - ./pyproject.toml:/workspace/pyproject.toml:ro

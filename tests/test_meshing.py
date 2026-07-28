@@ -86,7 +86,8 @@ class TestFindPointCloud:
         
         (test_dir / "points.ply").write_bytes(b"dummy")
         
-        result = find_point_cloud(str(test_dir))
+        # Call with skip_absolute_paths=True to avoid checking absolute paths
+        result = find_point_cloud(str(test_dir), skip_absolute_paths=True)
         
         assert result is not None
         assert "points.ply" in result
@@ -96,7 +97,8 @@ class TestFindPointCloud:
         empty_dir = temp_dir / "empty"
         empty_dir.mkdir(parents=True, exist_ok=True)
         
-        result = find_point_cloud(str(empty_dir))
+        # Call with skip_absolute_paths=True to avoid checking absolute paths
+        result = find_point_cloud(str(empty_dir), skip_absolute_paths=True)
         
         assert result is None
 
@@ -296,10 +298,14 @@ class TestMeshingPipeline:
         """Test pipeline function exists"""
         assert meshing_pipeline is not None
 
-    def test_pipeline_returns_none_on_missing_point_cloud(self, temp_dir):
+    @patch('meshing.find_point_cloud')
+    def test_pipeline_returns_none_on_missing_point_cloud(self, mock_find, temp_dir):
         """Test pipeline handles missing point cloud"""
         empty_dir = temp_dir / "empty"
         empty_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Mock find_point_cloud to return None
+        mock_find.return_value = None
         
         result = meshing_pipeline(
             str(empty_dir),

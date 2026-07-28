@@ -334,7 +334,66 @@ def export_textured_obj(mesh: dict, output_path: str, texture_size: int = 2048):
 
 
 def export_textured_glb(mesh: dict, output_path: str, texture_size: int = 2048):
-    """Export textured GLB model (simplified)"""
+    """Export textured GLB model using trimesh"""
+    try:
+        import trimesh
+        import json
+        
+        vertices = mesh['vertices']
+        faces = mesh['faces']
+        colors = mesh.get('colors')
+        uv_coords = mesh.get('uv_coords')
+        material = mesh.get('material', {})
+        
+        print("  Creating GLB file using trimesh...")
+        
+        # Create vertex colors (normalized to 0-1)
+        vertex_colors = None
+        if colors is not None and len(colors) > 0:
+            vertex_colors = colors.astype(float) / 255.0
+        
+        # Create trimesh Trimesh object with optional UV coordinates (note: class is Trimesh, not Mesh)
+        if uv_coords is not None and len(uv_coords) > 0:
+            mesh_obj = trimesh.Trimesh(
+                vertices=vertices,
+                faces=faces,
+                vertex_colors=vertex_colors,
+                face_attributes={
+                    'material': json.dumps({
+                        'specular_strength': material.get('specular_strength', 0.5),
+                        'roughness': material.get('roughness', 0.3),
+                        'metallic': material.get('metallic', 0.1),
+                        'clearcoat': material.get('clearcoat', 0.5)
+                    })
+                }
+            )
+            # Add UV coordinates if available
+            if len(uv_coords) == len(vertices):
+                mesh_obj.visual.uv = uv_coords
+        else:
+            mesh_obj = trimesh.Trimesh(
+                vertices=vertices,
+                faces=faces,
+                vertex_colors=vertex_colors
+            )
+        
+        # Export as GLB
+        mesh_obj.export(output_path, file_type='glb')
+        file_size = os.path.getsize(output_path)
+        print(f"    GLB file created: {len(vertices)} vertices, {len(faces)} faces ({file_size} bytes)")
+        
+    except ImportError:
+        print("  [Warning] trimesh not available, creating minimal GLB")
+        _fallback_textured_glb(mesh, output_path)
+    except Exception as e:
+        print(f"  [Error] GLB export failed: {e}")
+        # Fallback to OBJ
+        obj_path = output_path.replace('.glb', '.obj').replace('.gltf', '.obj')
+        export_textured_obj(mesh, obj_path, texture_size)
+
+
+def _fallback_textured_glb(mesh: dict, output_path: str):
+    """Fallback GLB export without trimesh"""
     try:
         import struct
         
@@ -342,40 +401,72 @@ def export_textured_glb(mesh: dict, output_path: str, texture_size: int = 2048):
         faces = mesh['faces']
         colors = mesh.get('colors')
         
-        print("  Creating GLB file (simplified format)...")
+        num_vertices = len(vertices)
+        num_faces = len(faces)
+        num_indices = num_faces * 3
         
-        # Create vertex data
-        vertex_data = []
-        for i in range(len(vertices)):
+        # Create vertex buffer: position (3 floats) + color (3 floats)
+        vertex_data = b''
+        for i in range(num_vertices):
             v = vertices[i]
-            vertex_data.extend([float(v[0]), float(v[1]), float(v[2])])
-            
+            vertex_data += struct.pack('<fff', float(v[0]), float(v[1]), float(v[2]))
             if colors is not None and len(colors) > i:
-                c = colors[i]
-                vertex_data.extend([float(c[0])/255.0, float(c[1])/255.0, float(c[2])/255.0])
+                c = colors[i].astype(float) / 255.0
+                vertex_data += struct.pack('<fff', float(c[0]), float(c[1]), float(c[2]))
             else:
-                vertex_data.extend([0.8, 0.8, 0.8])
+                vertex_data += struct.pack('<fff', 0.8, 0.8, 0.8)
         
-        # Create index data
-        index_data = []
-        for face in faces:
-            index_data.extend([int(face[0]), int(face[1]), int(face[2])])
+        # Create index buffer
+        index_data = struct.pack(f'<{num_indices}I', *faces.flatten())
         
-        # Save as binary
+        # Calculate chunk sizes with padding
+        vertex_chunk_size = len(vertex_data)
+        index_chunk_size = len(index_data)
+        vertex_padding = (8 - vertex_chunk_size % 8) % 8
+        index_padding = (8 - index_chunk_size % 8) % 8
+        
+        # GLB header (12 bytes)
+        header = struct.pack('<I3sI', 2, b'glTF', 12)
+        
+        # JSON chunk (minimal)
+        json_content = json.dumps({
+            "asset": {"version": "2.0", "generator": "texture_baking fallback"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "count": num_vertices}]}],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": num_vertices, "type": "VEC3"},
+                {"bufferView": 1, "componentType": 5123, "count": num_indices, "type": "SCALAR"}
+            ],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": vertex_chunk_size + vertex_padding, "target": 34962},
+                {"buffer": 0, "byteOffset": vertex_chunk_size + vertex_padding, "byteLength": index_chunk_size + index_padding, "target": 34963}
+            ],
+            "buffers": [{"byteLength": vertex_chunk_size + vertex_padding + index_chunk_size + index_padding}]
+        })
+        json_bytes = json_content.encode('utf-8')
+        json_padding = (8 - len(json_bytes) % 8) % 8
+        json_bytes += b' ' * json_padding
+        
+        # Binary data
+        binary_data = vertex_data + (b'\x00' * vertex_padding) + index_data + (b'\x00' * index_padding)
+        
+        # Calculate chunk headers
+        json_chunk = struct.pack('<II', len(json_bytes) + 5, 0x4E4F534A) + json_bytes
+        index_chunk = struct.pack('<II', len(binary_data), 0x004C4942) + binary_data
+        
+        # Write GLB file
         with open(output_path, 'wb') as f:
-            f.write(b'GLB')
-            f.write(struct.pack('<I', len(vertex_data)))
-            f.write(struct.pack('<I', len(index_data)))
-            f.write(struct.pack(f'{len(vertex_data)}f', *vertex_data))
-            f.write(struct.pack(f'{len(index_data)}I', *index_data))
+            f.write(header)
+            f.write(json_chunk)
+            f.write(index_chunk)
         
-        print(f"    GLB file created: {len(vertices)} vertices, {len(faces)} faces")
-    
+        file_size = os.path.getsize(output_path)
+        print(f"    Fallback GLB file created: {len(vertices)} vertices, {len(faces)} faces ({file_size} bytes)")
+        
     except Exception as e:
-        print(f"  [Error] GLB export failed: {e}")
-        # Fallback to OBJ
-        obj_path = output_path.replace('.glb', '.obj').replace('.gltf', '.obj')
-        export_textured_obj(mesh, obj_path, texture_size)
+        print(f"  [Error] Fallback GLB export failed: {e}")
 
 
 def export_textured_ply(mesh: dict, output_path: str):
