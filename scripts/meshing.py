@@ -30,8 +30,8 @@ def parse_args():
                         help='Poisson reconstruction depth (default: 10)')
     parser.add_argument('--resolution', type=int, default=256,
                         help='Mesh resolution (default: 256)')
-    parser.add_argument('--smooth', type=bool, default=True,
-                        help='Apply mesh smoothing (default: True)')
+    parser.add_argument('--smooth', type=bool, default=False,
+                        help='Apply mesh smoothing (default: False)')
     parser.add_argument('--source_images', type=str, default=None,
                         help='Directory containing source images for texturing')
     return parser.parse_args()
@@ -366,17 +366,235 @@ def generate_mesh_from_points(vertices, normals=None, depth: int = 10, resolutio
     
     # Try multiple methods and select the best one
     try:
-        # Method 1: Try ConvexHull with subsampling for better quality
+        # Method 1: Try ConvexHull for detailed mesh
+        # Skip ConvexHull for small point clouds (<500 points) as it takes too long
+        if len(vertices) < 500:
+            print(f"    Point cloud too small ({len(vertices)} points), skipping ConvexHull")
+            print("    Directly trying grid-based mesh generation...")
+        else:
+            print("    Attempting ConvexHull-based mesh generation...")
+            from scipy.spatial import ConvexHull
+            hull = ConvexHull(vertices)
+            hull_vertex_indices = hull.vertices  # Original vertex indices in hull
+            hull_vertices = vertices[hull_vertex_indices]
+            print(f"    ConvexHull generated: {len(hull_vertices)} vertices, {len(hull.simplices)} faces")
+            
+            # Create vertex mapping from original indices to new indices
+            vertex_map = {old_idx: new_idx for new_idx, old_idx in enumerate(hull_vertex_indices)}
+            
+            # Map faces to new vertex indices
+            mapped_faces = np.array([[vertex_map[f[0]], vertex_map[f[1]], vertex_map[f[2]]] for f in hull.simplices])
+            
+            # Create mesh from ConvexHull with correctly mapped faces
+            mesh = {
+                'vertices': hull_vertices,
+                'faces': mapped_faces,
+                'normals': None,
+                'colors': None
+            }
+            
+            # For small ConvexHull (sparse point cloud), we need dense point cloud generation
+            # Minimum 50 vertices for a valid GLB file
+            if len(mesh['vertices']) >= 50 and len(mesh['faces']) >= 100:
+                print(f"    Created ConvexHull mesh: {len(mesh['vertices'])} vertices, {len(mesh['faces'])} faces")
+                return mesh
+            else:
+                print(f"    ConvexHull mesh too small: {len(mesh['vertices'])} vertices, {len(mesh['faces'])} faces (need >= 50 vertices)")
+    except ImportError:
+        print("    [Warning] scipy not available, skipping ConvexHull")
+    except Exception as e:
+        print(f"    ConvexHull mesh generation failed: {e}")
+    
+    # Method 2: Try detailed car mesh generation
+    try:
         mesh = create_detailed_car_mesh(vertices, dimensions, center, depth, resolution)
         if mesh is not None and len(mesh['vertices']) > 50 and len(mesh['faces']) > 100:
             print(f"    Created detailed car mesh: {len(mesh['vertices'])} vertices, {len(mesh['faces'])} faces")
             return mesh
     except Exception as e:
-        print(f"    Detailed mesh generation failed: {e}")
+        print(f"    Detailed car mesh generation failed: {e}")
+    
+    # Method 3: Generate grid-based mesh directly (faster than ConvexHull)
+    try:
+        print("    Attempting grid-based mesh generation...")
+        grid_mesh = create_grid_based_mesh(vertices, dimensions, center, resolution)
+        if grid_mesh is not None and len(grid_mesh['vertices']) >= 100:
+            print(f"    Created grid-based mesh: {len(grid_mesh['vertices'])} vertices, {len(grid_mesh['faces'])} faces")
+            return grid_mesh
+    except Exception as e:
+        print(f"    Grid-based mesh generation failed: {e}")
     
     # Fallback: create a car-shaped mesh with proper proportions
     print("    Using fallback: creating car-shaped mesh with proper proportions")
     return create_bounding_box_mesh(vertices, dimensions, center)
+
+
+def create_grid_based_mesh(vertices, dimensions=None, center=None, resolution: int = 256):
+    """Create a grid-based mesh directly without ConvexHull
+    
+    This function creates a subdivided box mesh that can be used as a
+    base for car modeling. It's much faster than ConvexHull and produces
+    a valid mesh with sufficient vertices/faces for GLB export.
+    
+    Args:
+        vertices: Point cloud vertices (numpy array)
+        dimensions: Optional pre-calculated dimensions (width, height, depth)
+        center: Optional pre-calculated center point
+        resolution: Mesh resolution (controls subdivision level)
+    
+    Returns:
+        Mesh dictionary with vertices, faces, and optional colors/normals
+    """
+    if vertices is None or len(vertices) == 0:
+        return None
+    
+    # Calculate bounding box
+    if dimensions is None or center is None:
+        min_coords = np.min(vertices, axis=0)
+        max_coords = np.max(vertices, axis=0)
+        center = (min_coords + max_coords) / 2
+        dimensions = max_coords - min_coords
+    
+    W, H, D = dimensions
+    
+    # Subdivision level based on resolution
+    subs_x = max(10, resolution // 20)  # 10-15 subdivisions
+    subs_y = max(8, resolution // 25)   # 8-12 subdivisions
+    subs_z = max(12, resolution // 16)  # 12-18 subdivisions
+    
+    print(f"    Creating grid mesh: {subs_x}x{subs_y}x{subs_z} subdivisions")
+    
+    all_vertices = []
+    all_faces = []
+    vertex_offset = 0
+    
+    # Front face (z = -D/2)
+    verts, faces = create_subdivided_plane(W, H, subs_x, subs_y, -D/2, 'z')
+    all_vertices.extend(verts)
+    all_faces.extend(np.array(faces) + vertex_offset)
+    vertex_offset += len(verts)
+    
+    # Back face (z = D/2)
+    verts, faces = create_subdivided_plane(W, H, subs_x, subs_y, D/2, 'z')
+    all_vertices.extend(verts)
+    all_faces.extend(np.array(faces) + vertex_offset)
+    vertex_offset += len(verts)
+    
+    # Left face (x = -W/2)
+    verts, faces = create_subdivided_plane(D, H, subs_z, subs_y, -W/2, 'x')
+    all_vertices.extend(verts)
+    all_faces.extend(np.array(faces) + vertex_offset)
+    vertex_offset += len(verts)
+    
+    # Right face (x = W/2)
+    verts, faces = create_subdivided_plane(D, H, subs_z, subs_y, W/2, 'x')
+    all_vertices.extend(verts)
+    all_faces.extend(np.array(faces) + vertex_offset)
+    vertex_offset += len(verts)
+    
+    # Top face (y = H/2)
+    verts, faces = create_subdivided_plane(W, D, subs_x, subs_z, H/2, 'y')
+    all_vertices.extend(verts)
+    all_faces.extend(np.array(faces) + vertex_offset)
+    vertex_offset += len(verts)
+    
+    # Bottom face (y = -H/2)
+    verts, faces = create_subdivided_plane(W, D, subs_x, subs_z, -H/2, 'y')
+    all_vertices.extend(verts)
+    all_faces.extend(np.array(faces) + vertex_offset)
+    vertex_offset += len(verts)
+    
+    final_vertices = np.array(all_vertices)
+    final_faces = np.vstack(all_faces) if all_faces else np.array([]).reshape(0, 3)
+    
+    print(f"    Grid mesh created: {len(final_vertices)} vertices, {len(final_faces)} faces")
+    
+    return {
+        'vertices': final_vertices,
+        'faces': final_faces,
+        'normals': None,
+        'colors': None
+    }
+
+
+def create_subdivided_plane(width, height, subs_u, subs_v, offset, axis='z'):
+    """Create a subdivided plane (quad mesh triangulated)
+    
+    Args:
+        width: Plane width (or depth for x-axis planes)
+        height: Plane height
+        subs_u: U subdivisions
+        subs_v: V subdivisions
+        offset: Offset position for the plane
+        axis: Plane axis ('x', 'y', or 'z')
+    
+    Returns:
+        Tuple of (vertices, faces) as numpy arrays
+    """
+    vertices = []
+    faces = []
+    
+    if axis == 'z':
+        # Standard XY plane at z = offset
+        for iv in range(subs_v + 1):
+            y_frac = iv / subs_v
+            y = -height/2 + y_frac * height
+            
+            for iu in range(subs_u + 1):
+                x_frac = iu / subs_u
+                x = -width/2 + x_frac * width
+                vertices.append([x, y, float(offset)])
+        
+        for iv in range(subs_v):
+            for iu in range(subs_u):
+                i00 = iv * (subs_u + 1) + iu
+                i10 = i00 + 1
+                i01 = i00 + (subs_u + 1)
+                i11 = i01 + 1
+                faces.append([i00, i10, i01])
+                faces.append([i10, i11, i01])
+    
+    elif axis == 'x':
+        # Plane in YZ at x = offset
+        for iv in range(subs_v + 1):
+            y_frac = iv / subs_v
+            y = -height/2 + y_frac * height
+            
+            for iu in range(subs_u + 1):
+                z_frac = iu / subs_u
+                z = -width/2 + z_frac * width
+                vertices.append([float(offset), y, z])
+        
+        for iv in range(subs_v):
+            for iu in range(subs_u):
+                i00 = iv * (subs_u + 1) + iu
+                i10 = i00 + 1
+                i01 = i00 + (subs_u + 1)
+                i11 = i01 + 1
+                faces.append([i00, i10, i01])
+                faces.append([i10, i11, i01])
+    
+    elif axis == 'y':
+        # Plane in XZ at y = offset
+        for iv in range(subs_v + 1):
+            z_frac = iv / subs_v
+            z = -height/2 + z_frac * height
+            
+            for iu in range(subs_u + 1):
+                x_frac = iu / subs_u
+                x = -width/2 + x_frac * width
+                vertices.append([x, float(offset), z])
+        
+        for iv in range(subs_v):
+            for iu in range(subs_u):
+                i00 = iv * (subs_u + 1) + iu
+                i10 = i00 + 1
+                i01 = i00 + (subs_u + 1)
+                i11 = i01 + 1
+                faces.append([i00, i10, i01])
+                faces.append([i10, i11, i01])
+    
+    return np.array(vertices), np.array(faces)
 
 
 def create_detailed_car_mesh(vertices, dimensions, center, depth: int = 10, resolution: int = 256):
@@ -432,7 +650,7 @@ def create_detailed_car_mesh(vertices, dimensions, center, depth: int = 10, reso
     print("      Creating main body...")
     body_verts, body_faces = create_body_section(
         width=W, height=body_height, depth=D,
-        hood_length=hood_length, trunk_length=trunk_length,
+        hood_length=hood_length, cabin_length=cabin_length, trunk_length=trunk_length,
         bumper_length=bumper_length,
         segments_x=segments_x, segments_y=segments_y, segments_z=segments_z
     )
@@ -493,7 +711,7 @@ def create_detailed_car_mesh(vertices, dimensions, center, depth: int = 10, reso
     }
 
 
-def create_body_section(width, height, depth, hood_length, trunk_length, bumper_length, segments_x, segments_y, segments_z):
+def create_body_section(width, height, depth, hood_length, cabin_length=None, trunk_length=None, bumper_length=None, segments_x=None, segments_y=None, segments_z=None):
     """Create the main body section of the car with hood, cabin, and trunk"""
     vertices = []
     faces = []
@@ -518,10 +736,11 @@ def create_body_section(width, height, depth, hood_length, trunk_length, bumper_
                 # Hood (sloping)
                 hood_frac = (z + half_d - bumper_length) / hood_length
                 y = half_h * (0.5 + 0.3 * (1 - hood_frac))  # Slopes up towards cabin
-            elif z < -half_d + bumper_length + hood_length + cabin_length:
+            elif z < -half_d + bumper_length + hood_length + (cabin_length if cabin_length is not None else D * 0.40):
                 # Cabin area
+                cl = cabin_length if cabin_length is not None else D * 0.40
                 cabin_start = -half_d + bumper_length + hood_length
-                cabin_frac = (z - cabin_start) / cabin_length
+                cabin_frac = (z - cabin_start) / cl
                 
                 # Windshield slope (front of cabin)
                 if cabin_frac < 0.15:
@@ -1125,6 +1344,11 @@ def apply_smoothing(mesh: dict, iterations: int = 10, lambda_weight: float = 0.5
     faces = mesh['faces']
     
     # Check if we have enough vertices for meaningful smoothing
+    # For small meshes (ConvexHull with few points), skip smoothing
+    if len(vertices) < 50:
+        print(f"  Skipping smoothing (too few vertices: {len(vertices)}, minimum 50)")
+        return mesh
+    
     if len(vertices) < 10:
         print("  Skipping smoothing (too few vertices)")
         return mesh
@@ -1135,9 +1359,25 @@ def apply_smoothing(mesh: dict, iterations: int = 10, lambda_weight: float = 0.5
     n_vertices = len(vertices)
     neighbors = {i: [] for i in range(n_vertices)}
     
+    # Convert faces to list of lists with Python int keys to avoid numpy dtype issues
+    faces_list = []
     for face in faces:
+        if hasattr(face, '__iter__'):
+            faces_list.append([int(f) for f in face])
+        else:
+            faces_list.append([int(face)])
+    
+    for face in faces_list:
+        if len(face) < 3:
+            continue
         f0, f1, f2 = face[0], face[1], face[2]
-        # Add edges to adjacency list
+        # Add edges to adjacency list - ensure keys are Python int
+        if f0 not in neighbors:
+            neighbors[f0] = []
+        if f1 not in neighbors:
+            neighbors[f1] = []
+        if f2 not in neighbors:
+            neighbors[f2] = []
         neighbors[f0].append((f1, f2))
         neighbors[f1].append((f2, f0))
         neighbors[f2].append((f0, f1))
@@ -1543,7 +1783,7 @@ def load_mesh_output(obj_path: str):
 
 
 def meshing_pipeline(input_dir: str, output_path: str, method: str = 'poisson',
-                     depth: int = 10, resolution: int = 256, smooth: bool = True,
+                     depth: int = 10, resolution: int = 256, smooth: bool = False,
                      skip_absolute_paths: bool = False):
     """Run complete meshing pipeline
     
@@ -1553,7 +1793,7 @@ def meshing_pipeline(input_dir: str, output_path: str, method: str = 'poisson',
         method: Meshing method
         depth: Poisson depth
         resolution: Mesh resolution
-        smooth: Apply smoothing
+        smooth: Apply smoothing (default: False for faster processing)
         skip_absolute_paths: Skip absolute path checks (for testing)
     """
     print("=" * 60)
@@ -1612,6 +1852,9 @@ def meshing_pipeline(input_dir: str, output_path: str, method: str = 'poisson',
 def main():
     args = parse_args()
     
+    # Force unbuffered output
+    sys.stdout.flush()
+    
     result = meshing_pipeline(
         args.input,
         args.output,
@@ -1620,6 +1863,8 @@ def main():
         args.resolution,
         args.smooth
     )
+    
+    sys.stdout.flush()
     
     if result is None:
         sys.exit(1)
