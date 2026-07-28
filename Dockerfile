@@ -1,7 +1,7 @@
 # LGM Win 3090 - 3D Car Model Generator
 # Pipeline: COLMAP + 3D Gaussian Splatting + Meshing
-# Base image: NVIDIA CUDA 12.x with PyTorch
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+# Base image: NVIDIA CUDA 13.x with PyTorch (WSL2 RTX 3090)
+FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
 
 # Avoid interactive prompts during build
 ARG DEBIAN_FRONTEND=noninteractive
@@ -49,11 +49,11 @@ RUN ln -sf python3 /usr/bin/python
 # Working directory
 WORKDIR /workspace
 
-# Install PyTorch with CUDA 12.x support
+# Install PyTorch with CUDA 13.x support
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 
 RUN pip3 install --no-cache-dir torch torchvision torchaudio \
-    --extra-index-url https://download.pytorch.org/whl/cu121
+    --extra-index-url https://download.pytorch.org/whl/cu124
 
 # Install additional Python dependencies
 # Note: trimesh[extras] includes support for glb, obj, ply, and other 3D formats
@@ -96,12 +96,25 @@ RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git /workspa
     # Clone main repository submodules explicitly with retry logic
     git submodule init && \
     git submodule update --depth 1 && \
-    # Install diff-gaussian-rasterization (may fail without GPU, but source code is available)
-    cd submodules/diff-gaussian-rasterization && \
-    pip3 install --no-cache-dir . 2>&1 || echo "Warning: diff-gaussian-rasterization installation failed (may need GPU)", \
-    # Install simple-knn
-    cd ../simple-knn && \
-    pip3 install --no-cache-dir . 2>&1 || echo "Warning: simple-knn installation failed (may need GPU)", \
+    # Install GLM library for diff-gaussian-rasterization
+    cd submodules/diff-gaussian-rasterization/third_party && \
+    rm -rf glm && git clone --depth 1 https://github.com/g-truc/glm.git glm && \
+    # Fix GLM directory structure (glm.hpp needs to be at glm/glm/glm.hpp)
+    mkdir -p glm/glm && \
+    mv glm/glm.hpp glm/glm/ 2>/dev/null || true && \
+    for dir in gtc ext detail gtx simd; do \
+        if [ -d glm/$$dir ]; then \
+            mv glm/$$dir glm/glm/ 2>/dev/null || true; \
+        fi; \
+    done && \
+    # Install diff-gaussian-rasterization with CUDA 13.x support
+    cd /workspace/gaussian-splatting/submodules/diff-gaussian-rasterization && \
+    pip3 install --no-cache-dir -e . --no-build-isolation 2>&1 || echo "Warning: diff-gaussian-rasterization installation failed", \
+    # Install simple-knn with __init__.py
+    cd /workspace/gaussian-splatting/submodules/simple-knn && \
+    mkdir -p simple_knn && \
+    echo 'import simple_knn._C' > simple_knn/__init__.py && \
+    pip3 install --no-cache-dir -e . --no-build-isolation 2>&1 || echo "Warning: simple-knn installation failed", \
     # Set PYTHONPATH to include gaussian-splatting directory
     cd /workspace && \
     echo 'export PYTHONPATH=/workspace/gaussian-splatting:$PYTHONPATH' >> /etc/environment
