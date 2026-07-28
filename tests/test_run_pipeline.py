@@ -4,6 +4,7 @@ Tests for Run Pipeline Module
 
 import os
 import sys
+import subprocess
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -282,7 +283,7 @@ class TestRunVideoGeneration:
         """Test successful video generation"""
         mock_subprocess.return_value = MagicMock(returncode=0)
         
-        result = run_video_generation('/tmp/models', '/tmp/output.mp4')
+        result = run_video_generation('/tmp/models', '/tmp/output.mp4', 'orbit', 10.0)
         
         assert result is not None
 
@@ -291,7 +292,7 @@ class TestRunVideoGeneration:
         """Test failed video generation"""
         mock_subprocess.side_effect = subprocess.CalledProcessError(1, "cmd")
         
-        result = run_video_generation('/tmp/models', '/tmp/output.mp4')
+        result = run_video_generation('/tmp/models', '/tmp/output.mp4', 'orbit', 10.0)
         
         assert result is None
 
@@ -301,12 +302,28 @@ class TestPipelineMain:
 
     def test_main_function_exists(self):
         """Test main function exists"""
-        assert main is not None
+        assert callable(main)
 
     @patch('run_pipeline.check_dependencies')
-    def test_main_with_step_all(self, mock_check, monkeypatch, temp_dir):
+    @patch('run_pipeline.run_preprocessing')
+    @patch('run_pipeline.run_colmap')
+    @patch('run_pipeline.run_dense_reconstruction')
+    @patch('run_pipeline.run_gaussian_splatting')
+    @patch('run_pipeline.run_meshing')
+    @patch('run_pipeline.run_texture_baking')
+    @patch('run_pipeline.run_video_generation')
+    def test_main_with_step_all(self, mock_video, mock_tex, mock_mesh, 
+                                 mock_gs, mock_dense, mock_colmap, mock_preprocess,
+                                 mock_check, monkeypatch, temp_dir):
         """Test main function with step='all'"""
         mock_check.return_value = True
+        mock_preprocess.return_value = True
+        mock_colmap.return_value = '/tmp/colmap'
+        mock_dense.return_value = '/tmp/dense'
+        mock_gs.return_value = '/tmp/gs'
+        mock_mesh.return_value = '/tmp/model.glb'
+        mock_tex.return_value = '/tmp/textured.glb'
+        mock_video.return_value = '/tmp/video.mp4'
         
         input_dir = temp_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)

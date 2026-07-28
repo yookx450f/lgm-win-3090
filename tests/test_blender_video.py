@@ -4,6 +4,7 @@ Tests for Blender Video Module
 
 import os
 import sys
+import subprocess
 import pytest
 import json
 from pathlib import Path
@@ -20,7 +21,8 @@ from blender_video import (
     render_with_blendnet,
     export_video_ffmpeg,
     create_placeholder_video,
-    video_generation_pipeline
+    video_generation_pipeline,
+    main
 )
 
 
@@ -255,8 +257,10 @@ class TestVideoGenerationPipeline:
         """Test pipeline function exists"""
         assert video_generation_pipeline is not None
 
-    def test_pipeline_creates_placeholder_when_no_models(self, temp_dir):
+    @patch('blender_video.create_placeholder_video')
+    def test_pipeline_creates_placeholder_when_no_models(self, mock_placeholder, temp_dir):
         """Test pipeline creates placeholder when no models found"""
+        mock_placeholder.return_value = True
         empty_dir = temp_dir / "empty"
         empty_dir.mkdir(parents=True, exist_ok=True)
         
@@ -270,11 +274,16 @@ class TestVideoGenerationPipeline:
             30
         )
         
-        # Should create placeholder video
-        assert result is None or isinstance(result, str)
+        # Should call create_placeholder_video
+        assert mock_placeholder.called
 
-    def test_pipeline_with_models(self, sample_models_dir, temp_dir):
+    @patch('blender_video.render_with_blender')
+    @patch('blender_video.create_blender_script')
+    def test_pipeline_with_models(self, mock_script, mock_render, sample_models_dir, temp_dir):
         """Test pipeline with actual models"""
+        mock_script.return_value = "/tmp/script.py"
+        mock_render.return_value = True
+        
         result = video_generation_pipeline(
             str(sample_models_dir),
             str(temp_dir / "output.mp4"),
@@ -285,8 +294,8 @@ class TestVideoGenerationPipeline:
             30
         )
         
-        # Should handle gracefully
-        assert result is None or isinstance(result, str)
+        # Should call render_with_blender
+        assert mock_render.called
 
 
 class TestBlenderVideoMain:
@@ -294,4 +303,4 @@ class TestBlenderVideoMain:
 
     def test_main_function_exists(self):
         """Test main function exists"""
-        assert main is not None
+        assert callable(main)

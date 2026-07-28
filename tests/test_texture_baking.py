@@ -24,7 +24,8 @@ from texture_baking import (
     export_textured_model,
     export_textured_obj,
     export_textured_ply,
-    texture_baking_pipeline
+    texture_baking_pipeline,
+    main
 )
 
 
@@ -137,7 +138,7 @@ f 1 3 4
         result = load_obj(str(obj_file))
         
         assert result is not None
-        assert result['count'] == 4
+        # Check vertices shape instead of count (function doesn't return 'count' key)
         assert result['vertices'].shape == (4, 3)
         assert result['faces'] is not None
 
@@ -177,7 +178,7 @@ class TestLoadPlyModel:
         result = load_ply_model(str(ply_file))
         
         assert result is not None
-        assert result['count'] == 4
+        # Check vertices shape instead of count (function doesn't return 'count' key)
         assert result['vertices'].shape == (4, 3)
 
     def test_load_ply_empty(self, temp_dir):
@@ -321,4 +322,4 @@ class TestTextureBakingMain:
 
     def test_main_function_exists(self):
         """Test main function exists"""
-        assert main is not None
+        assert callable(main)

@@ -52,47 +52,43 @@ class TestNormalizeImage:
 
     def test_normalize_image_rgb(self):
         """Test normalization of RGB image"""
-        mock_image = MagicMock()
-        mock_image.mode = 'RGB'
-        mock_image.size = (800, 600)
-        mock_image.resize = MagicMock(return_value=mock_image)
+        from PIL import Image
+        # Create a simple test image
+        img = Image.new('RGB', (800, 600), color='red')
 
-        result = normalize_image(mock_image, 1024)
+        result = normalize_image(img, 1024)
 
-        mock_image.resize.assert_called_once()
         assert result is not None
+        assert result.size == (1024, 1024)
 
     def test_normalize_image_converts_non_rgb(self):
         """Test conversion of non-RGB images"""
-        mock_image = MagicMock()
-        mock_image.mode = 'RGBA'
-        mock_image.size = (800, 600)
-        mock_image.convert = MagicMock(return_value=mock_image)
-        mock_image.resize = MagicMock(return_value=mock_image)
+        from PIL import Image
+        # Create RGBA image
+        img = Image.new('RGBA', (800, 600), color='red')
 
-        result = normalize_image(mock_image, 1024)
+        result = normalize_image(img, 1024)
 
-        mock_image.convert.assert_called_once_with('RGB')
+        assert result is not None
+        assert result.mode == 'RGB'
 
     def test_normalize_image_maintains_aspect_ratio(self):
         """Test that aspect ratio is maintained"""
+        from PIL import Image
         # Wide image
-        mock_image = MagicMock()
-        mock_image.mode = 'RGB'
-        mock_image.size = (1920, 1080)  # 16:9 aspect ratio
-        mock_image.resize = MagicMock(return_value=mock_image)
+        img = Image.new('RGB', (1920, 1080), color='blue')
 
-        result = normalize_image(mock_image, 1024)
+        result = normalize_image(img, 1024)
 
-        # Should resize maintaining aspect ratio
-        mock_image.resize.assert_called_once()
+        assert result is not None
+        assert result.size == (1024, 1024)
 
 
 class TestDetectBackground:
     """Tests for background detection"""
 
     def test_detect_background_returns_mask(self):
-    """Test background detection returns a mask image"""
+        """Test background detection returns a mask image"""
         from unittest.mock import MagicMock
         import numpy as np
         
@@ -185,5 +181,7 @@ class TestPreprocessMain:
             '--output_dir', str(output_dir)
         ])
 
-        # Test main function exists
-        assert main is not None
+        # Test that parse_args works correctly
+        args = parse_args()
+        assert args.input_dir == str(input_dir)
+        assert args.output_dir == str(output_dir)
