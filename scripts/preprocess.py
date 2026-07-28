@@ -39,9 +39,28 @@ def parse_args():
 
 def normalize_image(image: Image.Image, target_size: int) -> Image.Image:
     """Normalize image size and format"""
-    # Convert to RGB if necessary
-    if image.mode != 'RGB':
+    # Handle special image modes (P, RGBA, L, 1, etc.)
+    if image.mode == 'P':
+        # Palette mode: convert using palette data
         image = image.convert('RGB')
+    elif image.mode == 'RGBA':
+        # Transparent background: composite onto white background
+        bg = Image.new('RGB', image.size, (255, 255, 255))
+        bg.paste(image, mask=image)
+        image = bg
+    elif image.mode == 'L':
+        # Grayscale: convert to RGB
+        image = image.convert('RGB')
+    elif image.mode == '1':
+        # 1-bit images: convert to RGB
+        image = image.convert('RGB')
+    elif image.mode != 'RGB':
+        # Fallback: try to convert to RGB
+        try:
+            image = image.convert('RGB')
+        except Exception:
+            print(f"    [Warning] Could not convert image from {image.mode} to RGB, skipping")
+            return image
     
     # Resize maintaining aspect ratio
     original_size = image.size
@@ -96,10 +115,16 @@ def remove_background(image: Image.Image, bg_color: str = 'white') -> Image.Imag
     
     # Convert to RGBA
     rgba_image = image.convert('RGBA')
-    rgba_mask = mask.convert('RGBA')
     
-    # Apply mask
-    rgba_image.putalpha(rgba_mask)
+    # Create alpha channel from mask (L mode)
+    # The mask is 'L' mode (grayscale), use it directly as alpha
+    alpha_channel = mask.convert('L')
+    
+    # Replace the alpha channel of the original image
+    # split() on RGBA returns 4 channels (R, G, B, A)
+    channels = rgba_image.split()
+    # Use the original alpha or the mask alpha (whichever is more opaque)
+    rgba_image = Image.merge('RGBA', (channels[0], channels[1], channels[2], alpha_channel))
     
     # Create background
     if bg_color == 'white':

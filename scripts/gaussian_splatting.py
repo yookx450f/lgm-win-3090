@@ -60,7 +60,9 @@ def setup_gaussian_splatting_workspace(source: str, output_path: str):
         return None
     
     # Find images
+    # Try multiple possible locations for images
     image_dirs = [
+        os.path.join(source, 'images', 'images'),  # COLMAP standard structure
         os.path.join(source, 'images'),
         os.path.join(source, 'preprocessed'),
         source
@@ -72,10 +74,14 @@ def setup_gaussian_splatting_workspace(source: str, output_path: str):
             image_files = glob.glob(os.path.join(d, '*.jpg')) + glob.glob(os.path.join(d, '*.png'))
             if image_files:
                 images_dir = d
+                print(f"  Found images in: {images_dir} ({len(image_files)} images)")
                 break
     
     if images_dir is None:
         print("[Error] Images not found")
+        print("  Searched directories:")
+        for d in image_dirs:
+            print(f"    - {d} (exists: {os.path.exists(d)})")
         return None
     
     return {

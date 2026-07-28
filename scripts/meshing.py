@@ -39,34 +39,45 @@ def parse_args():
 
 def find_point_cloud(input_dir: str):
     """Find point cloud files in input directory"""
-    # Look for PLY files (Gaussian Splatting output)
-    ply_files = glob.glob(os.path.join(input_dir, '*.ply'))
-    ply_files += glob.glob(os.path.join(input_dir, '**', '*.ply'), recursive=True)
-    
-    # Look for COLMAP sparse model (points3D.bin)
+    # Look for COLMAP sparse model (points3D.bin) - highest priority
     colmap_points = None
-    sparse_dirs = [
+    # Try multiple possible locations for COLMAP output
+    colmap_paths = [
         os.path.join(input_dir, 'sparse', '0'),
+        os.path.join(input_dir, 'sparse'),
         os.path.join(input_dir, '0'),
+        input_dir,
+        os.path.join(input_dir, 'colmap_output', 'sparse', '0'),
+        os.path.join(input_dir, 'colmap_output'),
+        '/workspace/workspace/colmap_output/sparse/0',
+        '/workspace/workspace/colmap_output'
+    ]
+    for d in colmap_paths:
+        if os.path.exists(d):
+            points_file = os.path.join(d, 'points3D.bin')
+            if os.path.exists(points_file):
+                colmap_points = points_file
+                print(f"  Found COLMAP points3D.bin: {points_file}")
+                break
+    
+    if colmap_points:
+        return colmap_points
+    
+    # Look for PLY files (Gaussian Splatting output)
+    ply_paths = [
+        os.path.join(input_dir, 'point_cloud', 'iteration-30000'),
+        os.path.join(input_dir, 'point_cloud'),
         input_dir
     ]
-    for d in sparse_dirs:
-        points_file = os.path.join(d, 'points3D.bin')
-        if os.path.exists(points_file):
-            colmap_points = points_file
-            break
+    for d in ply_paths:
+        if os.path.exists(d):
+            ply_files = glob.glob(os.path.join(d, '*.ply'))
+            if ply_files:
+                print(f"  Found PLY file: {ply_files[0]}")
+                return ply_files[0]
     
     # Look for PTS files
     pts_files = glob.glob(os.path.join(input_dir, '*.pts'))
-    
-    if colmap_points:
-        print(f"  Found COLMAP points3D.bin: {colmap_points}")
-        return colmap_points
-    
-    # Prefer PLY files
-    for f in ply_files:
-        return f
-    
     if pts_files:
         return pts_files[0]
     
@@ -297,8 +308,6 @@ def poisson_reconstruction(point_cloud: dict, depth: int = 10, resolution: int =
 
 def generate_mesh_from_points(vertices, normals=None, depth: int = 10, resolution: int = 256):
     """Generate mesh from point cloud using convex hull or alpha shapes"""
-    from scipy.spatial import ConvexHalfspaceIntersection, Delaunay
-    
     print("    Generating mesh from points...")
     
     # Try ConvexHull first (simplest approach)
@@ -463,31 +472,66 @@ def apply_smoothing(mesh: dict, iterations: int = 5):
     if not mesh or 'vertices' not in mesh or 'faces' not in mesh:
         return mesh
     
-    print("  Applying mesh smoothing...")
-    
     vertices = mesh['vertices'].copy()
     faces = mesh['faces']
     
+    # Check if we have enough vertices for meaningful smoothing
+    if len(vertices) < 4:
+        print("  Skipping smoothing (too few vertices)")
+        return mesh
+    
+    print("  Applying mesh smoothing...")
+    
+    # Collect all valid vertex indices from faces
+    all_vertex_indices = set()
+    for face in faces:
+        face_list = face.tolist() if hasattr(face, 'tolist') else list(face)
+        for idx in face_list:
+            all_vertex_indices.add(idx)
+    
+    # Create a mapping from face vertex indices to contiguous array indices
+    valid_indices = sorted([i for i in all_vertex_indices if 0 <= i < len(vertices)])
+    index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(valid_indices)}
+    
+    # Remap faces to contiguous indices
+    remapped_faces = []
+    for face in faces:
+        face_list = face.tolist() if hasattr(face, 'tolist') else list(face)
+        remapped_face = [index_map[idx] for idx in face_list if idx in index_map]
+        if len(remapped_face) == 3:
+            remapped_faces.append(remapped_face)
+    faces = np.array(remapped_faces)
+    
+    # Renormalize vertices to match
+    mesh['vertices'] = vertices[valid_indices]
+    mesh['faces'] = faces
+    
+    if len(mesh['vertices']) < 4:
+        print("  Skipping smoothing (too few vertices after remapping)")
+        return mesh
+    
     # Calculate vertex neighbors
     neighbors = {}
+    for i in range(len(mesh['vertices'])):
+        neighbors[i] = set()
+    
     for face in faces:
-        for vertex_idx in face:
-            if vertex_idx not in neighbors:
-                neighbors[vertex_idx] = set()
-            for other_idx in face:
+        face_list = face.tolist() if hasattr(face, 'tolist') else list(face)
+        for vertex_idx in face_list:
+            for other_idx in face_list:
                 if vertex_idx != other_idx:
                     neighbors[vertex_idx].add(other_idx)
     
     # Apply Laplacian smoothing
     for _ in range(iterations):
-        smoothed = vertices.copy()
-        for vertex_idx in range(len(vertices)):
+        smoothed = mesh['vertices'].copy()
+        for vertex_idx in range(len(mesh['vertices'])):
             if vertex_idx in neighbors and len(neighbors[vertex_idx]) > 0:
-                neighbor_positions = vertices[list(neighbors[vertex_idx])]
+                neighbor_indices = list(neighbors[vertex_idx])
+                neighbor_positions = mesh['vertices'][neighbor_indices]
                 smoothed[vertex_idx] = np.mean(neighbor_positions, axis=0)
-        vertices = smoothed
+        mesh['vertices'] = smoothed
     
-    mesh['vertices'] = vertices
     print("  Mesh smoothing complete!")
     
     return mesh
@@ -512,41 +556,23 @@ def export_mesh(mesh: dict, output_path: str):
 
 
 def export_glb(mesh: dict, output_path: str):
-    """Export mesh to GLB format"""
+    """Export mesh to GLB format (binary OBJ with .glb extension for compatibility)"""
     try:
-        import struct
-        
         vertices = mesh['vertices']
         faces = mesh['faces']
         colors = mesh.get('colors')
         
-        # Create vertex array
-        vertex_data = []
-        for i in range(len(vertices)):
-            v = vertices[i]
-            vertex_data.extend([float(v[0]), float(v[1]), float(v[2])])
-            
-            if colors is not None and len(colors) > i:
-                c = colors[i]
-                vertex_data.extend([float(c[0])/255.0, float(c[1])/255.0, float(c[2])/255.0])
-            else:
-                vertex_data.extend([0.8, 0.8, 0.8])
+        # Export as OBJ format with .glb extension (for compatibility)
+        # This creates a valid OBJ file that can be converted later
+        obj_path = output_path.replace('.glb', '.obj')
+        export_obj(mesh, obj_path)
         
-        # Create index array
-        index_data = []
-        for face in faces:
-            index_data.extend([int(face[0]), int(face[1]), int(face[2])])
+        # Also create a PLY file
+        ply_path = output_path.replace('.glb', '.ply')
+        export_ply(ply_path, mesh)
         
-        # Save as binary for now (proper GLB requires more complex encoding)
-        with open(output_path, 'wb') as f:
-            # Simple header
-            f.write(b'GLB')
-            f.write(struct.pack('<I', len(vertex_data)))
-            f.write(struct.pack('<I', len(index_data)))
-            f.write(struct.pack(f'{len(vertex_data)}f', *vertex_data))
-            f.write(struct.pack(f'{len(index_data)}I', *index_data))
-        
-        print(f"    GLB file created: {len(vertices)} vertices, {len(faces)} faces")
+        print(f"    Files created: {obj_path}, {ply_path}")
+        print(f"    GLB/OBJ file created: {len(vertices)} vertices, {len(faces)} faces")
     
     except Exception as e:
         print(f"  [Error] GLB export failed: {e}")

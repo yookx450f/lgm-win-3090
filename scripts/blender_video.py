@@ -233,6 +233,12 @@ def render_with_blender(script_path: str, output_video: str):
     """Render video using Blender"""
     print("  Rendering video with Blender...")
     
+    # Check if Blender is available
+    import shutil
+    if shutil.which('blender') is None:
+        print("  [Warning] Blender not found in system path")
+        return False
+    
     cmd = [
         'blender', '--background', '--python', script_path,
         '--',

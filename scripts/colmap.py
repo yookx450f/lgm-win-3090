@@ -86,16 +86,21 @@ def extract_features(images_dir: str, database_path: str, max_num_features: int 
     """Extract SIFT features from images"""
     print("  Extracting features...")
     
+    import os
+    env = os.environ.copy()
+    env['QT_QPA_PLATFORM'] = 'offscreen'
+    
     cmd = [
         'colmap', 'feature_extractor',
         '--database_path', database_path,
         '--image_path', images_dir,
-        '--FeatureExtractor.MaxNumFeatures', str(max_num_features),
-        '--FeatureExtractor.SIFT.RotationInvariant', '1'
+        '--SiftExtraction.max_num_features', str(max_num_features),
+        '--SiftExtraction.use_gpu', '0',
+        '--SiftExtraction.num_threads', '-1'
     ]
     
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
         print("    Features extracted successfully")
         return True
     except subprocess.CalledProcessError as e:
@@ -109,46 +114,38 @@ def match_features(database_path: str, max_error: float = 4.0):
     """Match features between images"""
     print("  Matching features...")
     
-    # Try sequential matcher first (good for panoramic/ordered images)
+    import os
+    env = os.environ.copy()
+    env['QT_QPA_PLATFORM'] = 'offscreen'
+    env['CUDA_VISIBLE_DEVICES'] = '-1'  # Disable GPU for matching
+    
+    # Use exhaustive matcher for unordered images (car from different angles)
     cmd = [
-        'colmap', 'sequential_matcher',
+        'colmap', 'exhaustive_matcher',
         '--database_path', database_path,
-        '--Matching.MaxError', str(max_error)
+        '--SiftMatching.max_error', str(max_error),
+        '--SiftMatching.use_gpu', '0'
     ]
     
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("    Sequential matching done")
-    except subprocess.CalledProcessError:
-        print("    Sequential matcher failed, trying spatial matcher...")
-        # Fall back to spatial matcher
-        cmd = [
-            'colmap', 'spatial_matcher',
-            '--database_path', database_path,
-            '--Matching.MaxError', str(max_error)
-        ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            print(f"    [Error] Feature matching failed: {e}")
-            return False
-    
-    print("    Features matched successfully")
-    return True
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+        print("    Exhaustive matching done")
+        print("    Features matched successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"    [Error] Feature matching failed: {e}")
+        if e.stderr:
+            print(f"    {e.stderr}")
+        return False
 
 
-def reconstruct_scene(database_path: str, sparse_dir: str):
+def reconstruct_scene(database_path: str, sparse_dir: str, images_dir: str):
     """Run Structure-from-Motion to reconstruct scene"""
     print("  Running Structure-from-Motion (SfM)...")
     
-    # Create initial point cloud from matches
-    cmd = [
-        'colmap', 'point_triangulator',
-        '--database_path', database_path,
-        '--image_path', os.path.join(os.path.dirname(os.path.dirname(sparse_dir)), 'images', 'images'),
-        '--input_path', sparse_dir,
-        '--output_path', sparse_dir
-    ]
+    import os
+    env = os.environ.copy()
+    env['QT_QPA_PLATFORM'] = 'offscreen'
     
     # First, create a dummy model if sparse directory is empty
     model_files = [f for f in os.listdir(sparse_dir) if f.endswith('.txt')] if os.path.exists(sparse_dir) else []
@@ -158,12 +155,12 @@ def reconstruct_scene(database_path: str, sparse_dir: str):
         cmd = [
             'colmap', 'mapper',
             '--database_path', database_path,
-            '--image_path', os.path.join(os.path.dirname(os.path.dirname(sparse_dir)), 'images', 'images'),
+            '--image_path', images_dir,
             '--output_path', sparse_dir
         ]
         
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
             print("    SfM reconstruction done")
         except subprocess.CalledProcessError as e:
             print(f"    [Error] SfM reconstruction failed: {e}")
@@ -176,12 +173,11 @@ def reconstruct_scene(database_path: str, sparse_dir: str):
             cmd = [
                 'colmap', 'point_triangulator',
                 '--database_path', database_path,
-                '--image_path', os.path.join(os.path.dirname(os.path.dirname(sparse_dir)), 'images', 'images'),
+                '--image_path', images_dir,
                 '--input_path', sparse_dir,
-                '--output_path', sparse_dir,
-                '--Triangulator.Type', 'refinement'
+                '--output_path', sparse_dir
             ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
             print("    Point triangulation done")
         except subprocess.CalledProcessError:
             pass
@@ -263,7 +259,7 @@ def colmap_pipeline(image_path: str, database_path: str, output_path: str,
         return None
     
     # Step 4: Reconstruct scene
-    if not reconstruct_scene(database_path, sparse_dir):
+    if not reconstruct_scene(database_path, sparse_dir, project['images_dir']):
         print("[Error] Scene reconstruction failed")
         return None
     
