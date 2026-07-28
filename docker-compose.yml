@@ -8,14 +8,18 @@ services:
       dockerfile: Dockerfile
     image: lgm-car-model:latest
     container_name: lgm-car-api
-    # WSL2 NVIDIA GPUアクセス設定（CDI webgpu方式）
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, compute, utility]
+    # WSL2 NVIDIA GPUアクセス設定
+    # WSL2 4.10+ではnvidia runtime直接使用が推奨
+    runtime: nvidia
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-cfg:/dev/nvidia-cfg
+      - /dev/nvidia-peermem:/dev/nvidia-peermem
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
     volumes:
       # Input images directory
       - ./input:/workspace/input
@@ -50,21 +54,24 @@ services:
       "
 
   # Legacy: Direct pipeline execution (for backward compatibility)
-  # WSL2 NVIDIA CDI (Common Device Interface) webgpu方式を使用
+  # WSL2 NVIDIA GPUアクセス設定（runtime: nvidia 方式）
   car-model:
     build:
       context: .
       dockerfile: Dockerfile
     image: lgm-car-model:latest
     container_name: lgm-car-model
-    # WSL2 NVIDIA GPUアクセス設定（CDI webgpu方式）
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, compute, utility]
+    # WSL2 NVIDIA GPUアクセス設定
+    runtime: nvidia
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-cfg:/dev/nvidia-cfg
+      - /dev/nvidia-peermem:/dev/nvidia-peermem
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
     volumes:
       # Input images directory
       - ./input:/workspace/input:ro
@@ -120,21 +127,23 @@ services:
       "
 
   # Optional: Interactive shell for debugging
-  # WSL2 NVIDIA CDI (Common Device Interface) webgpu方式を使用
+  # WSL2 NVIDIA GPUアクセス設定（runtime: nvidia 方式）
   car-model-shell:
     build:
       context: .
       dockerfile: Dockerfile
     image: lgm-car-model:latest
     container_name: lgm-car-model-shell
-    # WSL2 NVIDIA GPUアクセス設定（CDI webgpu方式）
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, compute, utility]
+    # WSL2 NVIDIA GPUアクセス設定
+    runtime: nvidia
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-cfg:/dev/nvidia-cfg
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
     volumes:
       - ./input:/workspace/input:ro
       - ./output:/workspace/output

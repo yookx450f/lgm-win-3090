@@ -497,6 +497,68 @@ def export_gaussian_splatting(output_path: str):
     return True
 
 
+def check_gpu_availability():
+    """Check GPU availability and print detailed information"""
+    print("=" * 60)
+    print("  GPU Availability Check")
+    print("=" * 60)
+    
+    try:
+        import torch
+        print(f"  PyTorch Version: {torch.__version__}")
+        print(f"  CUDA Available: {torch.cuda.is_available()}")
+        
+        if torch.cuda.is_available():
+            print(f"  CUDA Version (compiled): {torch.version.cuda}")
+            print(f"  cuDNN Version: {torch.backends.cudnn.version()}")
+            print(f"  Number of GPUs: {torch.cuda.device_count()}")
+            
+            for i in range(torch.cuda.device_count()):
+                print(f"\n  GPU {i}:")
+                print(f"    Name: {torch.cuda.get_device_name(i)}")
+                print(f"    Capability: {torch.cuda.get_device_capability(i)}")
+                props = torch.cuda.get_device_properties(i)
+                print(f"    Total Memory: {props.total_mem_mb / 1024:.1f} MB")
+                print(f"    Multi-Processor Count: {props.multi_processor_count}")
+                
+                # Check current allocation
+                allocated = torch.cuda.memory_allocated(i) / 1024**2
+                reserved = torch.cuda.memory_reserved(i) / 1024**2
+                print(f"    Memory Allocated: {allocated:.1f} MB")
+                print(f"    Memory Reserved: {reserved:.1f} MB")
+            
+            # Test a simple CUDA operation
+            print("\n  Testing simple CUDA operation...")
+            try:
+                test_tensor = torch.ones(1000, 1000, device='cuda')
+                test_result = torch.sum(test_tensor)
+                print(f"  CUDA Test: SUCCESS")
+                print(f"  Result: {test_result.item()}")
+                del test_tensor, test_result
+                torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"  CUDA Test: FAILED - {e}")
+        else:
+            print("\n  [WARNING] CUDA is NOT available!")
+            print("  Possible reasons:")
+            print("    1. NVIDIA drivers not installed or not accessible")
+            print("    2. NVIDIA container runtime not configured")
+            print("    3. GPU not exposed to container")
+            print("    4. CUDA toolkit version mismatch")
+            print("\n  Troubleshooting steps:")
+            print("    - Host: Run 'nvidia-smi' to verify GPU access")
+            print("    - Docker: Check 'docker ps' shows GPU device mappings")
+            print("    - Container: Run 'nvidia-ctk runtime configure --container=/etc/docker/daemon.json'")
+            
+    except ImportError:
+        print("  [ERROR] PyTorch not installed")
+    except Exception as e:
+        print(f"  [ERROR] GPU check failed: {e}")
+    
+    print("")
+    return torch.cuda.is_available() if 'torch' in globals() else False
+
+
 def run_gaussian_splatting_workspace(config: dict, params: dict):
     """Run Gaussian Splatting optimization"""
     model_dir = config['model_dir']
@@ -511,6 +573,13 @@ def run_gaussian_splatting_workspace(config: dict, params: dict):
     print(f"  Output: {output_path}")
     print(f"  Iterations: {params['iterations']}")
     print("")
+    
+    # Check GPU availability at the start of processing
+    gpu_available = check_gpu_availability()
+    if gpu_available:
+        print("  [INFO] GPU is available - using CUDA acceleration")
+    else:
+        print("  [WARNING] GPU is NOT available - processing will use CPU (very slow)")
     
     # Check if external Gaussian Splatting implementation is available
     gs_paths = [
@@ -584,6 +653,13 @@ def run_gaussian_splatting_workspace(config: dict, params: dict):
     
     env = os.environ.copy()
     env['QT_QPA_PLATFORM'] = 'offscreen'
+    
+    # Ensure GPU environment variables are set
+    if gpu_available:
+        env['CUDA_VISIBLE_DEVICES'] = str(params.get('cuda_device', 0))
+        print(f"  GPU Configuration:")
+        print(f"    CUDA_VISIBLE_DEVICES: {env['CUDA_VISIBLE_DEVICES']}")
+        print(f"    Device: {params.get('device', 'cuda')}")
     
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True,
