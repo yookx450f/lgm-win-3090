@@ -37,8 +37,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def find_point_cloud(input_dir: str):
-    """Find point cloud files in input directory"""
+def find_point_cloud(input_dir: str, skip_absolute_paths: bool = False):
+    """Find point cloud files in input directory
+    
+    Args:
+        input_dir: Input directory to search
+        skip_absolute_paths: If True, skip absolute path checks (for testing)
+    """
     # Look for COLMAP sparse model (points3D.bin) - highest priority
     colmap_points = None
     # Try multiple possible locations for COLMAP output
@@ -49,9 +54,15 @@ def find_point_cloud(input_dir: str):
         input_dir,
         os.path.join(input_dir, 'colmap_output', 'sparse', '0'),
         os.path.join(input_dir, 'colmap_output'),
-        '/workspace/workspace/colmap_output/sparse/0',
-        '/workspace/workspace/colmap_output'
     ]
+    
+    # Only add absolute paths if not skipping (for testing)
+    if not skip_absolute_paths:
+        colmap_paths.extend([
+            '/workspace/workspace/colmap_output/sparse/0',
+            '/workspace/workspace/colmap_output'
+        ])
+    
     for d in colmap_paths:
         if os.path.exists(d):
             points_file = os.path.join(d, 'points3D.bin')
@@ -307,18 +318,76 @@ def poisson_reconstruction(point_cloud: dict, depth: int = 10, resolution: int =
 
 
 def generate_mesh_from_points(vertices, normals=None, depth: int = 10, resolution: int = 256):
-    """Generate mesh from point cloud using convex hull or alpha shapes"""
-    print("    Generating mesh from points...")
+    """Generate mesh from point cloud for car body using convex hull
     
-    # Try ConvexHull first (simplest approach)
+    This function creates a car-shaped mesh from the point cloud by:
+    1. Analyzing the point cloud distribution to estimate car body dimensions
+    2. Creating a convex hull that approximates the car body shape
+    3. Validating the generated mesh for correctness
+    
+    Args:
+        vertices: Point cloud vertices (numpy array)
+        normals: Optional vertex normals
+        depth: Poisson reconstruction depth (unused in this method)
+        resolution: Mesh resolution (unused in this method)
+    
+    Returns:
+        Mesh dictionary with vertices, faces, and optional colors/normals
+    
+    Raises:
+        ValueError: If point cloud is invalid or too small
+    """
+    print("    Generating car body mesh from points...")
+    
+    # Validate input
+    if vertices is None or len(vertices) == 0:
+        print("    [Error] No vertices provided for mesh generation")
+        raise ValueError("No vertices provided for mesh generation")
+    
+    if len(vertices) < 4:
+        print(f"    [Error] Insufficient points for mesh generation: {len(vertices)} points (minimum 4 required)")
+        raise ValueError(f"Insufficient points for mesh generation: {len(vertices)} points (minimum 4 required)")
+    
+    # Validate that vertices are valid numbers
+    if not np.isfinite(vertices).all():
+        print("    [Error] Point cloud contains invalid values (NaN or Inf)")
+        raise ValueError("Point cloud contains invalid values (NaN or Inf)")
+    
+    # Calculate bounding box to understand car dimensions
+    min_coords = np.min(vertices, axis=0)
+    max_coords = np.max(vertices, axis=0)
+    center = (min_coords + max_coords) / 2
+    dimensions = max_coords - min_coords
+    
+    print(f"    Point cloud bounding box: {min_coords} to {max_coords}")
+    print(f"    Car body dimensions: {dimensions}")
+    
+    # Try ConvexHull first for car body shape
     try:
         from scipy.spatial import ConvexHull
         hull = ConvexHull(vertices)
         
+        # Use all vertices from the hull (not just unique vertices)
+        # The hull.vertices contains indices into the original vertices array
         mesh_vertices = vertices[hull.vertices]
         mesh_faces = hull.simplices
         
-        print(f"    Created mesh: {len(mesh_vertices)} vertices, {len(mesh_faces)} faces")
+        # Validate the generated mesh
+        if len(mesh_vertices) < 4:
+            print("    [Error] Generated mesh has too few vertices")
+            raise ValueError("Generated mesh has too few vertices")
+        
+        if len(mesh_faces) < 1:
+            print("    [Error] Generated mesh has no faces")
+            raise ValueError("Generated mesh has no faces")
+        
+        # Verify all face indices are valid
+        max_vertex_idx = mesh_faces.max()
+        if max_vertex_idx >= len(mesh_vertices):
+            print(f"    [Error] Invalid face indices: max={max_vertex_idx}, vertices={len(mesh_vertices)}")
+            raise ValueError(f"Invalid face indices in generated mesh")
+        
+        print(f"    Created car body mesh: {len(mesh_vertices)} vertices, {len(mesh_faces)} faces")
         
         return {
             'vertices': mesh_vertices,
@@ -327,43 +396,100 @@ def generate_mesh_from_points(vertices, normals=None, depth: int = 10, resolutio
             'colors': None
         }
     
+    except ValueError:
+        # Re-raise ValueError for validation errors
+        raise
     except Exception as e:
         print(f"    ConvexHull failed: {e}")
         print("    Using fallback method...")
     
-    # Fallback: create a simple box mesh
-    print("    Using fallback: creating bounding box mesh")
-    return create_bounding_box_mesh(vertices)
+    # Fallback: create a car-shaped bounding box mesh
+    print("    Using fallback: creating car-shaped bounding box mesh")
+    return create_bounding_box_mesh(vertices, dimensions, center)
 
 
-def create_bounding_box_mesh(vertices):
-    """Create a bounding box mesh as fallback"""
-    min_coords = np.min(vertices, axis=0)
-    max_coords = np.max(vertices, axis=0)
+def create_bounding_box_mesh(vertices, dimensions=None, center=None):
+    """Create a car-shaped bounding box mesh as fallback
     
-    # Create 8 corners of bounding box
+    This function creates a box mesh that approximates the car body shape
+    based on the point cloud dimensions.
+    
+    Args:
+        vertices: Point cloud vertices (numpy array)
+        dimensions: Optional pre-calculated dimensions (width, height, depth)
+        center: Optional pre-calculated center point
+    
+    Returns:
+        Mesh dictionary with vertices, faces, and optional colors/normals
+    
+    Raises:
+        ValueError: If point cloud is invalid or too small
+    """
+    # Validate input
+    if vertices is None or len(vertices) == 0:
+        print("    [Error] No vertices provided for bounding box mesh")
+        raise ValueError("No vertices provided for bounding box mesh")
+    
+    if len(vertices) < 3:
+        print(f"    [Error] Insufficient points for bounding box: {len(vertices)} points (minimum 3 required)")
+        raise ValueError(f"Insufficient points for bounding box: {len(vertices)} points (minimum 3 required)")
+    
+    # Calculate bounding box from vertices if not provided
+    if dimensions is None or center is None:
+        min_coords = np.min(vertices, axis=0)
+        max_coords = np.max(vertices, axis=0)
+        center = (min_coords + max_coords) / 2
+        dimensions = max_coords - min_coords
+    
+    # Validate dimensions
+    if np.any(dimensions <= 0):
+        print("    [Error] Invalid dimensions: must be positive")
+        raise ValueError("Invalid dimensions: must be positive")
+    
+    if np.any(~np.isfinite(center)):
+        print("    [Error] Invalid center coordinates")
+        raise ValueError("Invalid center coordinates")
+    
+    # Create 8 corners of bounding box centered at the calculated center
+    half_dims = dimensions / 2
     corners = np.array([
-        [min_coords[0], min_coords[1], min_coords[2]],
-        [max_coords[0], min_coords[1], min_coords[2]],
-        [max_coords[0], max_coords[1], min_coords[2]],
-        [min_coords[0], max_coords[1], min_coords[2]],
-        [min_coords[0], min_coords[1], max_coords[2]],
-        [max_coords[0], min_coords[1], max_coords[2]],
-        [max_coords[0], max_coords[1], max_coords[2]],
-        [min_coords[0], max_coords[1], max_coords[2]]
+        [center[0] - half_dims[0], center[1] - half_dims[1], center[2] - half_dims[2]],  # 0: min, min, min
+        [center[0] + half_dims[0], center[1] - half_dims[1], center[2] - half_dims[2]],  # 1: max, min, min
+        [center[0] + half_dims[0], center[1] + half_dims[1], center[2] - half_dims[2]],  # 2: max, max, min
+        [center[0] - half_dims[0], center[1] + half_dims[1], center[2] - half_dims[2]],  # 3: min, max, min
+        [center[0] - half_dims[0], center[1] - half_dims[1], center[2] + half_dims[2]],  # 4: min, min, max
+        [center[0] + half_dims[0], center[1] - half_dims[1], center[2] + half_dims[2]],  # 5: max, min, max
+        [center[0] + half_dims[0], center[1] + half_dims[1], center[2] + half_dims[2]],  # 6: max, max, max
+        [center[0] - half_dims[0], center[1] + half_dims[1], center[2] + half_dims[2]]   # 7: min, max, max
     ])
     
-    # Define 12 faces of the box
+    # Define 12 faces of the box (triangulated quads)
+    # Face ordering: Front, Back, Bottom, Top, Left, Right
     faces = np.array([
-        [0, 1, 2], [0, 2, 3],  # Front
-        [4, 5, 6], [4, 6, 7],  # Back
-        [0, 1, 5], [0, 5, 4],  # Bottom
-        [3, 2, 6], [3, 6, 7],  # Top
-        [0, 3, 7], [0, 7, 4],  # Left
-        [1, 2, 6], [1, 6, 5]   # Right
+        [0, 1, 2], [0, 2, 3],  # Front (z-min)
+        [4, 5, 6], [4, 6, 7],  # Back (z-max)
+        [0, 1, 5], [0, 5, 4],  # Bottom (y-min)
+        [3, 2, 6], [3, 6, 7],  # Top (y-max)
+        [0, 3, 7], [0, 7, 4],  # Left (x-min)
+        [1, 2, 6], [1, 6, 5]   # Right (x-max)
     ])
     
-    print(f"    Created bounding box: 8 vertices, 12 faces")
+    # Validate the generated mesh
+    if len(corners) != 8:
+        print(f"    [Error] Invalid number of corners: {len(corners)}")
+        raise ValueError(f"Invalid number of corners: {len(corners)}")
+    
+    if len(faces) != 12:
+        print(f"    [Error] Invalid number of faces: {len(faces)}")
+        raise ValueError(f"Invalid number of faces: {len(faces)}")
+    
+    # Verify all face indices are valid (0-7)
+    if faces.max() >= 8 or faces.min() < 0:
+        print(f"    [Error] Invalid face indices: min={faces.min()}, max={faces.max()}")
+        raise ValueError(f"Invalid face indices in generated mesh")
+    
+    print(f"    Created car-shaped bounding box: 8 vertices, 12 faces")
+    print(f"    Box dimensions: {dimensions}, Center: {center}")
     
     return {
         'vertices': corners,
@@ -538,9 +664,52 @@ def apply_smoothing(mesh: dict, iterations: int = 5):
 
 
 def export_mesh(mesh: dict, output_path: str):
-    """Export mesh to GLB/PLY/OBJ format"""
+    """Export mesh to GLB/PLY/OBJ format with validation
+    
+    This function validates the mesh before export and checks the output file
+    size to ensure a valid mesh was generated.
+    
+    Args:
+        mesh: Mesh dictionary with vertices, faces, and optional colors/normals
+        output_path: Output file path
+    
+    Returns:
+        True if export successful
+    
+    Raises:
+        ValueError: If mesh is invalid or output file is too small
+    """
     print(f"  Exporting mesh to: {output_path}")
     
+    # Validate mesh before export
+    if mesh is None:
+        print("  [Error] Cannot export: mesh is None")
+        raise ValueError("Cannot export: mesh is None")
+    
+    if 'vertices' not in mesh or 'faces' not in mesh:
+        print("  [Error] Invalid mesh: missing 'vertices' or 'faces'")
+        raise ValueError("Invalid mesh: missing 'vertices' or 'faces'")
+    
+    vertices = mesh['vertices']
+    faces = mesh['faces']
+    
+    if vertices is None or len(vertices) == 0:
+        print("  [Error] Cannot export: no vertices in mesh")
+        raise ValueError("Cannot export: no vertices in mesh")
+    
+    if faces is None or len(faces) == 0:
+        print("  [Error] Cannot export: no faces in mesh")
+        raise ValueError("Cannot export: no faces in mesh")
+    
+    if not np.isfinite(vertices).all():
+        print("  [Error] Cannot export: mesh contains invalid vertex values")
+        raise ValueError("Cannot export: mesh contains invalid vertex values")
+    
+    # Minimum file size check (1KB = 1024 bytes)
+    # Files smaller than this indicate invalid or corrupted mesh generation
+    MIN_FILE_SIZE = 1024
+    
+    # Export based on file extension
     ext = os.path.splitext(output_path)[1].lower()
     
     if ext == '.glb' or ext == '.gltf':
@@ -552,32 +721,162 @@ def export_mesh(mesh: dict, output_path: str):
     else:
         export_glb(mesh, output_path + '.glb')
     
+    # Validate output file size
+    actual_path = output_path
+    if ext == '' and os.path.exists(output_path + '.glb'):
+        actual_path = output_path + '.glb'
+    
+    if os.path.exists(actual_path):
+        file_size = os.path.getsize(actual_path)
+        
+        if file_size < MIN_FILE_SIZE:
+            print(f"  [Error] Generated file is too small: {file_size} bytes (minimum {MIN_FILE_SIZE} bytes)")
+            print(f"  [Error] This indicates an invalid or corrupted mesh was generated.")
+            print(f"  [Error] Skipping invalid file and aborting pipeline.")
+            raise ValueError(f"Generated file is too small: {file_size} bytes (minimum {MIN_FILE_SIZE} bytes). Invalid mesh detected. Pipeline aborted.")
+        
+        print(f"  Output file validated: {file_size} bytes")
+    else:
+        # Try checking other possible output paths
+        found = False
+        for possible_path in [output_path, output_path.replace('.glb', '.obj'), output_path.replace('.glb', '.ply')]:
+            if os.path.exists(possible_path):
+                file_size = os.path.getsize(possible_path)
+                if file_size < MIN_FILE_SIZE:
+                    print(f"  [Error] Generated file is too small: {possible_path} ({file_size} bytes)")
+                    print(f"  [Error] This indicates an invalid or corrupted mesh was generated.")
+                    print(f"  [Error] Skipping invalid file and aborting pipeline.")
+                    raise ValueError(f"Generated file is too small: {file_size} bytes. Invalid mesh detected. Pipeline aborted.")
+                print(f"  Output file validated: {possible_path} ({file_size} bytes)")
+                found = True
+                break
+        
+        if not found:
+            print("  [Error] Output file was not created")
+            raise ValueError("Output file was not created")
+    
     print(f"  Mesh exported: {output_path}")
+    return True
 
 
 def export_glb(mesh: dict, output_path: str):
-    """Export mesh to GLB format (binary OBJ with .glb extension for compatibility)"""
+    """Export mesh to proper GLB format using trimesh"""
     try:
+        import trimesh
+        
         vertices = mesh['vertices']
         faces = mesh['faces']
         colors = mesh.get('colors')
+        normals = mesh.get('normals')
         
-        # Export as OBJ format with .glb extension (for compatibility)
-        # This creates a valid OBJ file that can be converted later
+        # Create trimesh Trimesh object (note: class is Trimesh, not Mesh)
+        mesh_obj = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            vertex_colors=colors,
+            normals=normals
+        )
+        
+        # Export as GLB
+        mesh_obj.export(output_path, file_type='glb')
+        file_size = os.path.getsize(output_path)
+        print(f"    GLB file created: {len(vertices)} vertices, {len(faces)} faces ({file_size} bytes)")
+        
+        # Also create OBJ and PLY files for compatibility
         obj_path = output_path.replace('.glb', '.obj')
         export_obj(mesh, obj_path)
         
-        # Also create a PLY file
         ply_path = output_path.replace('.glb', '.ply')
         export_ply(ply_path, mesh)
         
-        print(f"    Files created: {obj_path}, {ply_path}")
-        print(f"    GLB/OBJ file created: {len(vertices)} vertices, {len(faces)} faces")
-    
+        print(f"    Also created: {obj_path}, {ply_path}")
+        
+    except ImportError:
+        print("  [Warning] trimesh not available, using fallback export")
+        _fallback_glb_export(mesh, output_path)
     except Exception as e:
         print(f"  [Error] GLB export failed: {e}")
         # Fallback to PLY
         export_ply(output_path.replace('.glb', '.ply'), mesh)
+
+
+def _fallback_glb_export(mesh: dict, output_path: str):
+    """Fallback GLB export without trimesh (creates minimal valid GLB)"""
+    try:
+        import struct
+        
+        vertices = mesh['vertices']
+        faces = mesh['faces']
+        colors = mesh.get('colors')
+        
+        # Calculate vertex attributes
+        num_vertices = len(vertices)
+        num_faces = len(faces)
+        num_indices = num_faces * 3
+        
+        # Create vertex buffer: position (3 floats) + color (3 floats)
+        vertex_data = b''
+        for i in range(num_vertices):
+            v = vertices[i]
+            vertex_data += struct.pack('<fff', float(v[0]), float(v[1]), float(v[2]))
+            if colors is not None and len(colors) > i:
+                c = colors[i]
+                vertex_data += struct.pack('<fff', float(c[0])/255.0, float(c[1])/255.0, float(c[2])/255.0)
+            else:
+                vertex_data += struct.pack('<fff', 0.8, 0.8, 0.8)
+        
+        # Create index buffer
+        index_data = struct.pack(f'<{num_indices}I', *faces.flatten())
+        
+        # Calculate chunk sizes
+        vertex_chunk_size = len(vertex_data)
+        index_chunk_size = len(index_data)
+        
+        # GLB header (12 bytes)
+        header = struct.pack('<I3sI', 2, b'glTF', 12)
+        
+        # JSON chunk (minimal)
+        json_content = json.dumps({
+            "asset": {"version": "2.0", "generator": "fallback exporter"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "count": num_vertices}]}],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": num_vertices, "max": [float('inf')]*3, "min": [float('-inf')]*3, "type": "VEC3"},
+                {"bufferView": 1, "componentType": 5123, "count": num_indices, "type": "SCALAR"}
+            ],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": vertex_chunk_size, "target": 34962},
+                {"buffer": 0, "byteOffset": vertex_chunk_size, "byteLength": index_chunk_size, "target": 34963}
+            ],
+            "buffers": [{"byteLength": vertex_chunk_size + index_chunk_size}]
+        })
+        json_bytes = json_content.encode('utf-8')
+        # Pad JSON to 8-byte boundary
+        json_padding = (8 - len(json_bytes) % 8) % 8
+        json_bytes += b' ' * json_padding
+        
+        # Binary data (padded to 8-byte boundary)
+        vertex_padding = (8 - vertex_chunk_size % 8) % 8
+        index_padding = (8 - index_chunk_size % 8) % 8
+        binary_data = vertex_data + (b'\x00' * vertex_padding) + index_data + (b'\x00' * index_padding)
+        
+        # Calculate chunk headers
+        json_chunk = struct.pack('<II', len(json_bytes) + 5, 0x4E4F534A) + json_bytes
+        index_chunk = struct.pack('<II', len(binary_data), 0x004C4942) + binary_data
+        
+        # Write GLB file
+        with open(output_path, 'wb') as f:
+            f.write(header)
+            f.write(json_chunk)
+            f.write(index_chunk)
+        
+        file_size = os.path.getsize(output_path)
+        print(f"    Fallback GLB file created: {len(vertices)} vertices, {len(faces)} faces ({file_size} bytes)")
+        
+    except Exception as e:
+        print(f"  [Error] Fallback GLB export failed: {e}")
 
 
 def export_obj(mesh: dict, output_path: str):
@@ -685,8 +984,19 @@ def load_mesh_output(obj_path: str):
 
 
 def meshing_pipeline(input_dir: str, output_path: str, method: str = 'poisson',
-                     depth: int = 10, resolution: int = 256, smooth: bool = True):
-    """Run complete meshing pipeline"""
+                     depth: int = 10, resolution: int = 256, smooth: bool = True,
+                     skip_absolute_paths: bool = False):
+    """Run complete meshing pipeline
+    
+    Args:
+        input_dir: Input directory
+        output_path: Output file path
+        method: Meshing method
+        depth: Poisson depth
+        resolution: Mesh resolution
+        smooth: Apply smoothing
+        skip_absolute_paths: Skip absolute path checks (for testing)
+    """
     print("=" * 60)
     print("  Meshing Pipeline")
     print("=" * 60)
@@ -696,7 +1006,7 @@ def meshing_pipeline(input_dir: str, output_path: str, method: str = 'poisson',
     print("")
     
     # Step 1: Find point cloud
-    pc_file = find_point_cloud(input_dir)
+    pc_file = find_point_cloud(input_dir, skip_absolute_paths=skip_absolute_paths)
     
     if pc_file is None:
         print("[Error] No point cloud found")
